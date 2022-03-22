@@ -1305,6 +1305,20 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 >
 >更改operator chaining：通过对operator设置chaning可以提高性能。但是不同的Flink版本在升级后可能会打破这种chaining，所以，所有的operator最好添加uid。
 
+### 聊聊flink的ParameterTool
+
+https://cloud.tencent.com/developer/article/1398203
+
+>## **小结**
+>
+>- ParameterTool提供了fromPropertiesFile、fromArgs、fromSystemProperties、fromMap静态方法用于创建ParameterTool
+>- ParameterTool提供了get、getRequired、getInt、getLong、getFloat、getDouble、getBoolean、getShort、getByte等方法，每种类型的get均提供了一个支持defaultValue的方法
+>- ParameterTool继承了ExecutionConfig.GlobalJobParameters，其toMap方法返回的是data属性；使用env.getConfig().setGlobalJobParameters可以将ParameterTool的访问范围设置为global
+>
+>## **doc**
+>
+>- Parsing command line arguments and passing them around in your Flink application
+
 # sgg_flink 学习笔记
 
 ## Flink 简介
