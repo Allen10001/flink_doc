@@ -136,7 +136,7 @@ https://gitlab.bigdata.letv.com/data-realtime/rdp.jobs.mob   中的 rdp.mob.ios.
 >
 >### Serializability
 >
->Apache Flink uses Java Serialization (java.io.Serializable) to ship the function objects (here the `MapFunction`) to the workers that execute them in parallel. Because of that, the functions need to be serializable: The function may not contain any non-serializable fields, i.e. types that are not primitive (int, long, double, ...) and not implementing `java.io.Serializable`.
+>**Apache Flink uses Java Serialization (java.io.Serializable) to ship the function objects (here the `MapFunction`) to the workers that execute them in parallel.** Because of that, the functions need to be serializable: The function may not contain any non-serializable fields, i.e. types that are not primitive (int, long, double, ...) and not implementing `java.io.Serializable`.
 >
 >The typical way to work with non-serializable constructs is to lazily initialize them.
 >
@@ -406,21 +406,193 @@ As shown in the example, definitions of table sources, views, and temporal table
 >
 >Each ExecutionGraph has a job status associated with it. This job status indicates the current state of the job execution.
 
+## Monitoring Back Pressure
+
+https://nightlies.apache.org/flink/flink-docs-release-1.12/ops/monitoring/back_pressure.html
+
+**Back Pressure**
+
+If you see a **back pressure warning** (e.g. `High`) for a task, this means that it is producing data faster than the downstream operators can consume. Records in your job flow downstream (e.g. from sources to sinks) and back pressure is propagated in the opposite direction, up the stream.
+
+Take a simple `Source -> Sink` job as an example. If you see a warning for `Source`, this means that `Sink` is consuming data slower than `Source` is producing. `Sink` is back pressuring the upstream operator `Source`.
+
+**Sampling Back Pressure**
+
+Back pressure monitoring works by repeatedly taking back pressure samples of your running tasks. The JobManager triggers repeated calls to `Task.isBackPressured()` for the tasks of your job.
+
+![img](flink_note.assets/back_pressure_sampling.png)
+
+Internally, back pressure is judged based on the availability of output buffers. If there is no available buffer (at least one) for output, then it indicates that there is back pressure for the task.
+
+By default, the job manager triggers 100 samples every 50ms for each task in order to determine back pressure. The ratio you see in the web interface tells you how many of these samples were indicating back pressure, e.g. `0.01` indicates that only 1 in 100 was back pressured.
+
+- **OK**: 0 <= Ratio <= 0.10
+- **LOW**: 0.10 < Ratio <= 0.5
+- **HIGH**: 0.5 < Ratio <= 1
+
+In order to not overload the task managers with back pressure samples, the web interface refreshes samples only after 60 seconds.
+
+**Configuration**
+
+You can configure the number of samples for the job manager with the following configuration keys:
+
+- `web.backpressure.refresh-interval`: Time after which available stats are deprecated and need to be refreshed (DEFAULT: 60000, 1 min).
+- `web.backpressure.num-samples`: Number of samples to take to determine back pressure (DEFAULT: 100).
+- `web.backpressure.delay-between-samples`: Delay between samples to determine back pressure (DEFAULT: 50, 50 ms).
+
+## 分布式运行时环境
+
+>本文档是 Apache Flink 的旧版本。建议访问 [最新的稳定版本](https://ci.apache.org/projects/flink/flink-docs-stable/zh)。**
+>
+>- [任务和算子链](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/concepts/runtime.html#任务和算子链)
+>- [Job Managers、Task Managers、客户端（Clients）](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/concepts/runtime.html#job-managerstask-managers客户端clients)
+>- [Task Slots 和资源](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/concepts/runtime.html#task-slots-和资源)
+>- [State Backends](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/concepts/runtime.html#state-backends)
+>- [Savepoints](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/concepts/runtime.html#savepoints)
+>
+>## 任务和算子链
+>
+>分布式计算中，Flink 将算子（operator）的 subtask *链接（chain）*成 task。每个 task 由一个线程执行。把算子链接成 tasks 能够减少线程间切换和缓冲的开销，在降低延迟的同时提高了整体吞吐量。链接操作的配置详情可参考：[chaining docs](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/dev/stream/operators/#task-chaining-and-resource-groups)
+>
+>下图的 dataflow 由五个 subtasks 执行，因此具有五个并行线程。
+>
+>![Operator chaining into Tasks](flink_note.assets/tasks_chains.svg)
+>
+>[ Back to top](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/concepts/runtime.html#top)
+>
+>## Job Managers、Task Managers、客户端（Clients）
+>
+>Flink 运行时包含两类进程：
+>
+>- **JobManagers** （也称为 *masters*）协调分布式计算。它们负责调度任务、协调 checkpoints、协调故障恢复等。
+>
+>  每个 Job 至少会有一个 JobManager。高可用部署下会有多个 JobManagers，其中一个作为 *leader*，其余处于 *standby* 状态。
+>
+>- **TaskManagers**（也称为 *workers*）执行 dataflow 中的 *tasks*（准确来说是 subtasks ），并且缓存和交换数据 *streams*。
+>
+>  每个 Job 至少会有一个 TaskManager。
+>
+>JobManagers 和 TaskManagers 有多种启动方式：直接在机器上启动（该集群称为 [standalone cluster](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/ops/deployment/cluster_setup.html)），在容器或资源管理框架，如 [YARN](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/ops/deployment/yarn_setup.html) 或 [Mesos](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/ops/deployment/mesos.html)，中启动。TaskManagers 连接到 JobManagers，通知后者自己可用，然后开始接手被分配的工作。
+>
+>**客户端**虽然不是运行时（runtime）和作业执行时的一部分，但它是被用作准备和提交 dataflow 到 JobManager 的。提交完成之后，客户端可以断开连接，也可以保持连接来接收进度报告。客户端既可以作为触发执行的 Java / Scala 程序的一部分，也可以在命令行进程中运行`./bin/flink run ...`。
+>
+>![The processes involved in executing a Flink dataflow](flink_note.assets/processes.svg)
+>
+>[ Back to top](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/concepts/runtime.html#top)
+>
+>## Task Slots 和资源
+>
+>每个 worker（TaskManager）都是一个 *JVM 进程*，并且可以在不同的线程中执行一个或多个 subtasks。为了控制 worker 接收 task 的数量，worker 拥有所谓的 **task slots** （至少一个）。
+>
+>每个 *task slots* 代表 TaskManager 的一份固定资源子集。例如，具有三个 slots 的 TaskManager 会将其管理的内存资源分成三等份给每个 slot。 划分资源意味着 subtask 之间不会竞争资源，但是也意味着它们只拥有固定的资源。注意这里并没有 CPU 隔离，当前 slots 之间只是划分任务的内存资源。
+>
+>通过调整 slot 的数量，用户可以决定 subtasks 的隔离方式。每个 TaskManager 有一个 slot 意味着每组 task 在一个单独的 JVM 中运行（例如，在一个单独的容器中启动）。拥有多个 slots 意味着多个 subtasks 共享同一个 JVM。 Tasks 在同一个 JVM 中共享 TCP 连接（通过多路复用技术）和心跳信息（heartbeat messages）。它们还可能共享数据集和数据结构，从而降低每个 task 的开销。
+>
+>![A TaskManager with Task Slots and Tasks](flink_note.assets/tasks_slots.svg)
+>
+>默认情况下，Flink 允许 subtasks 共享 slots，即使它们是不同 tasks 的 subtasks，只要它们来自同一个 job。因此，一个 slot 可能会负责这个 job 的整个管道（pipeline）。允许 *slot sharing* 有两个好处：
+>
+>- Flink 集群需要与 job 中使用的最高并行度一样多的 slots。这样不需要计算作业总共包含多少个 tasks（具有不同并行度）。
+>- 更好的资源利用率。在没有 slot sharing 的情况下，简单的 subtasks（*source/map()*）将会占用和复杂的 subtasks （*window*）一样多的资源。通过 slot sharing，将示例中的并行度从 2 增加到 6 可以充分利用 slot 的资源，同时确保繁重的 subtask 在 TaskManagers 之间公平地获取资源。
+>
+>![TaskManagers with shared Task Slots](flink_note.assets/slot_sharing.svg)
+>
+>APIs 还包含了 *[resource group](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/dev/stream/operators/#task-chaining-and-resource-groups)* 机制，它可以用来防止不必要的 slot sharing。
+>
+>根据经验，合理的 slots 数量应该和 CPU 核数相同。在使用超线程（hyper-threading）时，每个 slot 将会占用 2 个或更多的硬件线程上下文（hardware thread contexts）。
+>
+>[ Back to top](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/concepts/runtime.html#top)
+>
+>## State Backends
+>
+>key/values 索引存储的数据结构取决于 [state backend](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/ops/state/state_backends.html) 的选择。一类 state backend 将数据存储在内存的哈希映射中，另一类 state backend 使用 [RocksDB](http://rocksdb.org/) 作为键/值存储。除了定义保存状态（state）的数据结构之外， state backend 还实现了获取键/值状态的时间点快照的逻辑，并将该快照存储为 checkpoint 的一部分。
+>
+>![checkpoints and snapshots](flink_note.assets/checkpoints.svg)
+>
+>[ Back to top](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/concepts/runtime.html#top)
+>
+>## Savepoints
+>
+>用 Data Stream API 编写的程序可以从 **savepoint** 继续执行。Savepoints 允许在不丢失任何状态的情况下升级程序和 Flink 集群。
+>
+>[Savepoints](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/ops/state/savepoints.html) 是**手动触发的 checkpoints**，它依靠常规的 checkpoint 机制获取程序的快照并将其写入 state backend。在执行期间，程序会定期在 worker 节点上创建快照并生成 checkpoints。对于恢复，Flink 仅需要最后完成的 checkpoint，而一旦完成了新的 checkpoint，旧的就可以被丢弃。
+>
+>Savepoints 类似于这些定期的 checkpoints，除了它们是**由用户触发**并且在新的 checkpoint 完成时**不会自动过期**。你可以通过[命令行](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/ops/cli.html#savepoints) 或在取消一个 job 时通过 [REST API](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/monitoring/rest_api.html#cancel-job-with-savepoint) 来创建 Savepoints。
+
+## [Checkpointing under backpressure](https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/ops/state/checkpointing_under_backpressure/)
+
+>## Buffer debloating [#](https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/ops/state/checkpointing_under_backpressure/#buffer-debloating)
+>
+>Flink 1.14 introduced a new tool to automatically control the amount of buffered in-flight data between Flink operators/subtasks. The buffer debloating mechanism can be enabled by setting the property `taskmanager.network.memory.buffer-debloat.enabled` to `true`.
+>
+>This feature works with both aligned and unaligned checkpoints and can improve checkpointing times in both cases, but the effect of the debloating is most visible with aligned checkpoints. When using buffer debloating with unaligned checkpoints, the added benefit will be smaller checkpoint sizes and quicker recovery times (there will be less in-flight data to persist and recover).
+>
+>For more information on how the buffer debloating feature works and how to configure it, please refer to the [network memory tuning guide](https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/deployment/memory/network_mem_tuning/). Keep in mind that you can also manually reduce the amount of buffered in-flight data which is also described in the aforementioned tuning guide.
+>
+>## Unaligned checkpoints [#](https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/ops/state/checkpointing_under_backpressure/#unaligned-checkpoints)
+>
+>Starting with Flink 1.11, checkpoints can be unaligned. [Unaligned checkpoints](https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/concepts/stateful-stream-processing/#unaligned-checkpointing) contain in-flight data (i.e., data stored in buffers) as part of the checkpoint state, allowing checkpoint barriers to overtake these buffers. Thus, the checkpoint duration becomes independent of the current throughput as checkpoint barriers are effectively not embedded into the stream of data anymore.
+>
+>You should use unaligned checkpoints if your checkpointing durations are very high due to backpressure. Then, checkpointing time becomes mostly independent of the end-to-end latency. Be aware unaligned checkpointing adds to I/O to the state storage, so you shouldn’t use it when the I/O to the state storage is actually the bottleneck during checkpointing.
+>
+>
+
 # 学习文章
 
-### [深度解读：Flink 1.11 SQL流批一体的增强与完善](https://cloud.tencent.com/developer/news/661653)
+## [Flink新特性之非对齐检查点（unaligned checkpoint）简介](https://blog.csdn.net/nazeniwaresakini/article/details/107954076)
 
-### [Flink算子使用方法及实例演示：keyBy、reduce和aggregations](https://zhuanlan.zhihu.com/p/98975650)
+>非对齐检查点
+>顾名思义，非对齐检查点取消了屏障对齐操作。其流程图示如下。
+>
+>
+>简单解说：
+>
+>a) 当算子的所有输入流中的第一个屏障到达算子的输入缓冲区时，立即将这个屏障发往下游（输出缓冲区）。
+>
+>b) 由于第一个屏障没有被阻塞，它的步调会比较快，超过一部分缓冲区中的数据。算子会标记两部分数据：一是屏障首先到达的那条流中被超过的数据，二是其他流中位于当前检查点屏障之前的所有数据（当然也包括进入了输入缓冲区的数据），如下图中标黄的部分所示。
+>
+>
+>c) 将上述两部分数据连同算子的状态一起做异步快照。
+>
+>由此可见，非对齐检查点的机制与原生C-L算法更为相似一些（即需要由算子来记录输入流的状态）。它与对齐检查点的区别主要有三：
+>
+>对齐检查点在最后一个屏障到达算子时触发，非对齐检查点在第一个屏障到达算子时就触发。
+>
+>对齐检查点在第一个屏障到最后一个屏障到达的区间内是阻塞的，而非对齐检查点不需要阻塞。
+>
+>显然，即使再考虑反压的情况，屏障也不会因为输入流速度变慢而堵在各个算子的入口处，而是能比较顺畅地由Source端直达Sink端，从而缓解检查点失败超时的现象。
+>
+>对齐检查点能够保持快照N~N + 1之间的边界，但非对齐检查点模糊了这个边界。
+>既然不同检查点的数据都混在一起了，非对齐检查点还能保证exactly once语义吗？答案是肯定的。当任务从非对齐检查点恢复时，除了对齐检查点也会涉及到的Source端重放和算子的计算状态恢复之外，未对齐的流数据也会被恢复到各个链路，三者合并起来就是能够保证exactly once的完整现场了。
+>
+>非对齐检查点目前仍然作为试验性的功能存在，并且它也不是十全十美的（所谓优秀的implementation往往都要考虑trade-off），主要缺点有二：
+>
+>需要额外保存数据流的现场，总的状态大小可能会有比较明显的膨胀（文档中说可能会达到a couple of GB per task），磁盘压力大。当集群本身就具有I/O bound的特点时，该缺点的影响更明显。
+>
+>从状态恢复时也需要额外恢复数据流的现场，作业重新拉起的耗时可能会很长。特别地，如果第一次恢复失败，有可能触发death spiral（死亡螺旋）使得作业永远无法恢复。
+>
+>所以，官方当前推荐仅将它应用于那些容易产生反压且I/O压力较小（比如原始状态不太大）的作业中。随着后续版本的打磨，非对齐检查点肯定会更加好用。
+>————————————————
+>版权声明：本文为CSDN博主「LittleMagics」的原创文章，遵循CC 4.0 BY-SA版权协议，转载请附上原文出处链接及本声明。
+>原文链接：https://blog.csdn.net/nazeniwaresakini/article/details/107954076
+
+## [深度解读：Flink 1.11 SQL流批一体的增强与完善](https://cloud.tencent.com/developer/news/661653)
+
+## [Flink算子使用方法及实例演示：keyBy、reduce和aggregations](https://zhuanlan.zhihu.com/p/98975650)
 
 >`keyBy`算子将`DataStream`转换成一个`KeyedStream`。`KeyedStream`是一种特殊的`DataStream`，事实上，`KeyedStream`继承了`DataStream`，`DataStream`的各元素随机分布在各Task Slot中，`KeyedStream`的各元素按照Key分组，分配到各Task Slot中。我们需要向`keyBy`算子传递一个参数，以告知Flink以什么字段作为Key进行分组。
+>
+>其实，这些aggregation操作里已经封装了状态数据，比如，`sum`算子内部记录了当前的和，`max`算子内部记录了当前的最大值。由于内部封装了状态数据，而且状态数据并不会被清理，因此一定要避免在一个无限数据流上使用aggregation。
+>
+>注意，**对于一个`KeyedStream`,一次只能使用一个aggregation操作，无法链式使用多个。**
 
-### [Apache Flink 漫谈系列 - 双流JOIN](https://mp.weixin.qq.com/s/BiO4Ba6wRH4tlTdT2w7fzw)
+## [Apache Flink 漫谈系列 - 双流JOIN](https://mp.weixin.qq.com/s/BiO4Ba6wRH4tlTdT2w7fzw)
 
-### [Flink算子使用方法及实例演示：union和connect](https://juejin.im/post/6844904031677218829)
+## [Flink算子使用方法及实例演示：union和connect](https://juejin.im/post/6844904031677218829)
 
 >对于`ConnectedStreams`，我们需要重写`CoMapFunction`或`CoFlatMapFunction`。这两个接口都提供了三个泛型，这三个泛型分别对应第一个输入流的数据类型、第二个输入流的数据类型和输出流的数据类型。在重写函数时，对于`CoMapFunction`，`map1`处理第一个流的数据，`map2`处理第二个流的数据；对于`CoFlatMapFunction`，**`flatMap1`处理第一个流的数据，`flatMap2`处理第二个流的数据。Flink并不能保证两个函数调用顺序，两个函数的调用依赖于两个数据流数据的流入先后顺序，即第一个数据流有数据到达时，`map1`或`flatMap1`会被调用，第二个数据流有数据到达时，`map2`或`flatMap2`会被调用。**
 
-### [Flink Table & SQL Catalog 及DataStream、Table相互转换](https://blog.csdn.net/wangpei1949/article/details/103216738)
+## [Flink Table & SQL Catalog 及DataStream、Table相互转换](https://blog.csdn.net/wangpei1949/article/details/103216738)
 
 >Catalog维护了Flink Table和SQL中的元数据，如`Database`、`Table`、`View`、`UDF`等。
 >
@@ -452,13 +624,13 @@ As shown in the example, definitions of table sources, views, and temporal table
 >   - Append模式: 当Table仅通过INSERT修改时使用此模式。
 >  - Retract模式: 一般都可使用此模式。通过一个Boolean类型标记当前操作类型。True代表Add(添加)，False代表Retract(撤回)。
 
-### [Flink 原理与实现：Window 机制](http://wuchong.me/blog/2016/05/25/flink-internals-window-mechanism/)
+## [Flink 原理与实现：Window 机制](http://wuchong.me/blog/2016/05/25/flink-internals-window-mechanism/)
 
 >翻滚计数窗口并不带evictor，只注册了一个trigger。该trigger是带purge功能的 CountTrigger。也就是说每当窗口中的元素数量达到了 window-size，trigger就会返回fire+purge，窗口就会执行计算并清空窗口中的所有元素，再接着储备新的元素。从而实现了tumbling的窗口之间无重叠。
 >
 >滑动计数窗口的各窗口之间是有重叠的，但我们用的 GlobalWindows assinger 从始至终只有一个窗口，不像 sliding time assigner 可以同时存在多个窗口。所以trigger结果不能带purge，也就是说计算完窗口后窗口中的数据要保留下来（供下个滑窗使用）。另外，trigger的间隔是slide-size，evictor的保留的元素个数是window-size。也就是说，每个滑动间隔就触发一次窗口计算，并保留下最新进入窗口的window-size个元素，剔除旧元素。
 
-### [Flink dynamic table转成stream实战](https://www.jianshu.com/p/c352d0c4a458)
+## [Flink dynamic table转成stream实战](https://www.jianshu.com/p/c352d0c4a458)
 
 >## Append-only stream
 >
@@ -514,13 +686,13 @@ As shown in the example, definitions of table sources, views, and temporal table
 
 
 
-### [Dynamic Tables](https://ci.apache.org/projects/flink/flink-docs-release-1.11/dev/table/streaming/dynamic_tables.html#table-to-stream-conversion)
+## [Dynamic Tables](https://ci.apache.org/projects/flink/flink-docs-release-1.11/dev/table/streaming/dynamic_tables.html#table-to-stream-conversion)
 
-### [Time Attributes](https://ci.apache.org/projects/flink/flink-docs-release-1.11/dev/table/streaming/time_attributes.html#using-a-tablesource-1)
+## [Time Attributes](https://ci.apache.org/projects/flink/flink-docs-release-1.11/dev/table/streaming/time_attributes.html#using-a-tablesource-1)
 
 
 
-### [flink教程-聊聊 flink 1.11 中新的水印策略](https://blog.csdn.net/zhangjun5965/article/details/107304278?utm_medium=distribute.pc_relevant.none-task-blog-searchFromBaidu-1.control&depth_1-utm_source=distribute.pc_relevant.none-task-blog-searchFromBaidu-1.control)
+## [flink教程-聊聊 flink 1.11 中新的水印策略](https://blog.csdn.net/zhangjun5965/article/details/107304278?utm_medium=distribute.pc_relevant.none-task-blog-searchFromBaidu-1.control&depth_1-utm_source=distribute.pc_relevant.none-task-blog-searchFromBaidu-1.control)
 
 ># 背景
 >
@@ -568,7 +740,7 @@ As shown in the example, definitions of table sources, views, and temporal table
 
 
 
-### [Flink Window & Time详解](https://blog.csdn.net/weixin_44519468/article/details/105983367)
+## [Flink Window & Time详解](https://blog.csdn.net/weixin_44519468/article/details/105983367)
 
 >整个流程还有一个问题需要讨论：Window 中的状态存储。我们知道 Flink 是支持
 >Exactly Once 处理语义的，那么 Window 中的状态存储和普通的状态存储又有什么不
@@ -581,7 +753,7 @@ As shown in the example, definitions of table sources, views, and temporal table
 >
 >![image-20201210153147783](./flink_note.assets/image-20201210153147783.png)
 
-### [Flink重启策略/配置重启策略](https://blog.csdn.net/qq_33982605/article/details/106207065)
+## [Flink重启策略/配置重启策略](https://blog.csdn.net/qq_33982605/article/details/106207065)
 
 ># 重启策略
 >
@@ -616,7 +788,7 @@ As shown in the example, definitions of table sources, views, and temporal table
 >     代表的是过去某段时间内，如果失败的次数没超过某次，就可以一直重启
 >     不常用
 
-### [Flink检查点/保存点提交](https://blog.csdn.net/qq_33982605/article/details/106206977)
+## [Flink检查点/保存点提交](https://blog.csdn.net/qq_33982605/article/details/106206977)
 
 ># 检查点生成多个
 >
@@ -656,7 +828,7 @@ As shown in the example, definitions of table sources, views, and temporal table
 >
 > 保存点侧重的是维护，即flink作业需要在人工干预的情况下进行重启或升级，维护完毕后再从保存点恢复到升级后的状态。
 
-### [探究 Flink on YARN 模式下 TaskManager 的内存分配](https://blog.csdn.net/magic_kid_2010/article/details/108075383?utm_medium=distribute.pc_relevant.none-task-blog-OPENSEARCH-3.control&depth_1-utm_source=distribute.pc_relevant.none-task-blog-OPENSEARCH-3.control)（重要）
+## [探究 Flink on YARN 模式下 TaskManager 的内存分配](https://blog.csdn.net/magic_kid_2010/article/details/108075383?utm_medium=distribute.pc_relevant.none-task-blog-OPENSEARCH-3.control&depth_1-utm_source=distribute.pc_relevant.none-task-blog-OPENSEARCH-3.control)（重要）
 
 >![img](https://imgconvert.csdnimg.cn/aHR0cHM6Ly91cGxvYWQtaW1hZ2VzLmppYW5zaHUuaW8vdXBsb2FkX2ltYWdlcy8xOTUyMzAtMWRlYzliMzAwYjFmOGUzZi5wbmc?x-oss-process=image/format,png)
 >
@@ -682,7 +854,7 @@ As shown in the example, definitions of table sources, views, and temporal table
 >- 空闲内存（Free）：虽然名为空闲，但实际上是存储用户代码和数据结构的，固定在堆内，可以理解为堆内内存除去托管内存后剩下的那部分。
 >
 
-### h3 [flink的 memorysegment](https://blog.csdn.net/zhoucs86/article/details/91049219)（全面、重要）
+## h3 [flink的 memorysegment](https://blog.csdn.net/zhoucs86/article/details/91049219)（全面、重要）
 
 > ## 积极的内存管理
 >
@@ -774,7 +946,7 @@ As shown in the example, definitions of table sources, views, and temporal table
 > - 如果reference不为空，则会取该对象的地址，加上后面的offset，从相对地址处取出8字节并得到 long。这对应了堆内存的场景。
 > - 如果reference为空，则offset就是要操作的绝对地址，从该地址处取出数据。这对应了堆外内存的场景。
 
-### [Flink Timer（定时器）机制与其具体实现](https://www.jianshu.com/p/9ae1d2974304?utm_campaign=hugo)（重要）
+## [Flink Timer（定时器）机制与其具体实现](https://www.jianshu.com/p/9ae1d2974304?utm_campaign=hugo)（重要）
 
 >org.apache.flink.streaming.api.operators.InternalTimeServiceManagerImpl
 >
@@ -1148,7 +1320,7 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 	}
 ```
 
-### [Flink系列之Metrics, 指标监控](https://zhuanlan.zhihu.com/p/50686853) 写得很好，能明白基本原理
+## [Flink系列之Metrics, 指标监控](https://zhuanlan.zhihu.com/p/50686853) 写得很好，能明白基本原理
 
 >Flink Metrics指任务在flink集群中运行过程中的各项指标，包括机器系统指标：Hostname，CPU，Memory，Thread，GC，NetWork，IO 和 任务运行组件指标：JobManager，TaskManager，Job, Task，Operater相关指标。Flink提供metrics的目的有两点：第一，实时采集metrics的数据供flink UI进行数据展示，用户可以在页面上看到自己提交任务的状态，延迟等信息。第二，对外提供metrics收集接口，用户可以将整个fllink集群的metrics通过MetricsReport上报至第三方系统进行存储，展示和监控。第二种对大型的互联网公司很有用，一般他们的集群规模比较大，不可能通过flink UI进行所有任务的展示，所以就通过metrics上报的方式进行dashboard的展示，同时存储下来的metrics可以用于监控报警，更进一步来说，可以用历史数据进行数据挖掘产生更大的价值。Flink原生的提供了几种主流的第三方上报方式：JMXReporter，GangliaReport，GraphiteReport等，用户可以直接配置使用。
 >
@@ -1235,17 +1407,17 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 >
 >metrics.reporters指定report的名称，metrics.reporter.grph.class指定具体的MetricsReport实现类，metrics.reporter.grph.host指定远端graphite主机ip，metrics.reporter.grph.port指定远端graphite监听端口，metrics.reporter.grph.protocol指定graphite利用的协议。
 >
->- 最后保存文件，重启flink集群即可生效
+>- 最后保存文件，重启flink集群即可生效s
 >
 >如果我们不使用flink原生的MetricsReport，想自己实现定制的Report可以吗？答案是肯定的，用户可以参照GraphiteReporter类，自定义类继承 ScheduledDropwizardReporter类，重写report方法即可。我们现在除了利用GraphiteReport，也自己定义了KafkaReport上报定制的metrics来满足更多的用户需求。
 
-### [Flink Metrics, 官网](https://ci.apache.org/projects/flink/flink-docs-stable/ops/metrics.html#metrics)
+## [Flink Metrics, 官网](https://ci.apache.org/projects/flink/flink-docs-stable/ops/metrics.html#metrics)
 
 >## Latency tracking
 >
 >Note that the latency markers are not accounting for the time user records spend in operators as they are bypassing them. In particular the markers are not accounting for the time records spend for example in window buffers. Only if operators are not able to accept new records, thus they are queuing up, the latency measured using the markers will reflect that.
 
-### [flink任务性能优化](https://www.cnblogs.com/luxiaoxun/p/12114728.html)
+## [flink任务性能优化](https://www.cnblogs.com/luxiaoxun/p/12114728.html)
 
 >**一、Operator Chain(任务链接)**
 >
@@ -1255,7 +1427,7 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 >
 >**二、Slot Sharing（槽位共享）**
 >
->Slot Sharing 是指，来自同一个 Job 且拥有相同 slotSharingGroup（默认：default）名称的不同 Task 的 SubTask 之间可以共享一个 Slot，这使得一个 Slot 有机会持有 Job 的一整条 Pipeline，这也是上文提到的在默认 slotSharing 的条件下 Job 启动所需的 Slot 数和 Job 中 Operator 的最大 parallelism 相等的原因。通过 Slot Sharing 机制可以更进一步提高 Job 运行性能，在 Slot 数不变的情况下增加了 Operator 可设置的最大的并行度，让类似 window 这种消耗资源的 Task 以最大的并行度分布在不同 TM 上，同时像 map、filter 这种较简单的操作也不会独占 Slot 资源，降低资源浪费的可能性。
+>Slot Sharing 是指，来自同一个 Job 且拥有相同 slotSharingGroup（默认：default）名称的不同 Task 的 SubTask 之间**可以共享一个 Slot**，这使得一个 Slot 有机会持有 Job 的一整条 Pipeline，这也是上文提到的**在默认 slotSharing 的条件下 Job 启动所需的 Slot 数和 Job 中 Operator 的最大 parallelism 相等的原因**。通过 Slot Sharing 机制可以更进一步提高 Job 运行性能，在 Slot 数不变的情况下增加了 Operator 可设置的最大的并行度，让类似 window 这种消耗资源的 Task 以最大的并行度分布在不同 TM 上，同时像 map、filter 这种较简单的操作也不会独占 Slot 资源，降低资源浪费的可能性。
 >
 >**三、Flink 异步 IO**
 >
@@ -1289,7 +1461,7 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 >
 >**总结**
 >
->Operator Chain 是将多个 Operator 链接在一起放置在一个 Task 中，只针对 Operator。Slot Sharing 是在一个 Slot 中执行多个 Task，针对的是 Operator Chain 之后的 Task。这两种优化都充分利用了计算资源，减少了不必要的开销，提升了 Job 的运行性能。异步IO能解决需要高效访问其他系统的问题，提升任务执行的性能。Checkpoint优化是集群配置上的优化，提升集群本身的处理能力。
+>**Operator Chain 是将多个 Operator 链接在一起放置在一个 Task 中，只针对 Operator。Slot Sharing 是在一个 Slot 中执行多个 Task，针对的是 Operator Chain 之后的 Task。**这两种优化都充分利用了计算资源，减少了不必要的开销，提升了 Job 的运行性能。异步IO能解决需要高效访问其他系统的问题，提升任务执行的性能。Checkpoint优化是集群配置上的优化，提升集群本身的处理能力。
 
 ### [Flink流计算编程--Flink扩容、程序升级前后的思考](https://blog.csdn.net/lmalds/article/details/73457767)(很全面)
 
@@ -1513,7 +1685,7 @@ public TriggerResult onEventTime(long time, TimeWindow window, TriggerContext ct
 
 6. P77  下游任务收到一个新检查点分隔符时，会继续等待其他输入分区也发来这个检查点的分割符。
 
-   等待过程中，继续处理还没发来分隔符分区发来的数据，对于已经提供分割符的数据，新到来的数据会被缓存起来，不能处理。  这个过程称为 分隔符对齐。
+   等待过程中，**继续处理还没发来分隔符分区发来的数据，对于已经提供分割符的数据，新到来的数据会被缓存起来，不能处理。  这个过程称为 分隔符对齐。**
 
 7. 下游任务收齐所有的分区分隔符后，通知状态后端生成检查点，并把检查点分隔符广播到下游任务。
 
