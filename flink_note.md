@@ -136,7 +136,7 @@ https://gitlab.bigdata.letv.com/data-realtime/rdp.jobs.mob   中的 rdp.mob.ios.
 >
 >### Serializability
 >
->**Apache Flink uses Java Serialization (java.io.Serializable) to ship the function objects (here the `MapFunction`) to the workers that execute them in parallel.** Because of that, the functions need to be serializable: The function may not contain any non-serializable fields, i.e. types that are not primitive (int, long, double, ...) and not implementing `java.io.Serializable`.
+>**Apache Flink uses Java Serialization (java.io.Serializable) to ship the function objects (here the `MapFunction`) to the workers（工作进程） that execute them in parallel.** Because of that, the functions need to be serializable: The function may not contain any non-serializable fields, i.e. types that are not primitive (int, long, double, ...) and not implementing `java.io.Serializable`.
 >
 >The typical way to work with non-serializable constructs is to lazily initialize them.
 >
@@ -858,34 +858,34 @@ You can configure the number of samples for the job manager with the following c
 
 > ## 积极的内存管理
 >
-> Flink 并不是将大量对象存在堆上，而是将对象都序列化到一个预分配的内存块上，这个内存块叫做 `MemorySegment`，它代表了一段固定长度的内存（默认大小为 32KB），也是 Flink 中最小的内存分配单元，并且提供了非常高效的读写方法。你可以把 MemorySegment 想象成是为 Flink 定制的 `java.nio.ByteBuffer`。它的底层可以是一个普通的 Java 字节数组（`byte[]`），也可以是一个申请在堆外的 `ByteBuffer`。每条记录都会以序列化的形式存储在一个或多个`MemorySegment`中。
+> **Flink 并不是将大量对象存在堆上，而是将对象都序列化到一个预分配的内存块上，这个内存块叫做 `MemorySegment`，它代表了一段固定长度的内存（默认大小为 32KB），也是 Flink 中最小的内存分配单元，并且提供了非常高效的读写方法。** 你可以把 MemorySegment 想象成是为 Flink 定制的 `java.nio.ByteBuffer`。它的底层可以是一个普通的 Java 字节数组（`byte[]`），也可以是一个申请在堆外的 `ByteBuffer`。每条记录都会以序列化的形式存储在一个或多个`MemorySegment`中。
 >
 > Flink 中的 Worker 名叫 TaskManager，是用来运行用户代码的 JVM 进程。TaskManager 的堆内存主要被分成了三个部分：
 >
 > ![image-20210302164011180](./flink_note.assets/image-20210302164011180.png)
 >
-> - **Network Buffers:** 一定数量的32KB大小的 buffer，主要用于数据的网络传输。在 TaskManager 启动的时候就会分配。默认数量是 2048 个，可以通过 `taskmanager.network.numberOfBuffers` 来配置。（阅读[这篇文章](http://wuchong.me/blog/2016/04/26/flink-internals-how-to-handle-backpressure/#网络传输中的内存管理)了解更多Network Buffer的管理）
-> - **Memory Manager Pool:** 这是一个由 `MemoryManager` 管理的，由众多`MemorySegment`组成的超大集合。Flink 中的算法（如 sort/shuffle/join）会向这个内存池申请 MemorySegment，将序列化后的数据存于其中，使用完后释放回内存池。默认情况下，池子占了堆内存的 70% 的大小。
+> - **Network Buffers:** 一定数量的32KB大小的 buffer，**主要用于数据的网络传输。**在 TaskManager 启动的时候就会分配。默认数量是 2048 个，可以通过 `taskmanager.network.numberOfBuffers` 来配置。（阅读[这篇文章](http://wuchong.me/blog/2016/04/26/flink-internals-how-to-handle-backpressure/#网络传输中的内存管理)了解更多Network Buffer的管理）
+> - **Memory Manager Pool:** 这是一个由 `MemoryManager` 管理的，由众多`MemorySegment`组成的超大集合。**Flink 中的算法（如 sort/shuffle/join）会向这个内存池申请 MemorySegment，将序列化后的数据存于其中，使用完后释放回内存池。**默认情况下，池子占了堆内存的 70% 的大小。
 > - **Remaining (Free) Heap:** 这部分的内存是留给用户代码以及 TaskManager 的数据结构使用的。因为这些数据结构一般都很小，所以基本上这些内存都是给用户代码使用的。从GC的角度来看，可以把这里看成的新生代，也就是说这里主要都是由用户代码生成的短期对象。
 >
 > 从上面我们能够得出 Flink 积极的内存管理以及直接操作二进制数据有以下几点好处：
 >
-> 1. **减少GC压力。**显而易见，因为所有常驻型数据都以二进制的形式存在 Flink 的`MemoryManager`中，这些`MemorySegment`一直呆在老年代而不会被GC回收。其他的数据对象基本上是由用户代码生成的短生命周期对象，这部分对象可以被 Minor GC 快速回收。只要用户不去创建大量类似缓存的常驻型对象，那么老年代的大小是不会变的，Major GC也就永远不会发生。从而有效地降低了垃圾回收的压力。另外，这里的内存块还可以是堆外内存，这可以使得 JVM 内存更小，从而加速垃圾回收。
-> 2. **避免了OOM。**所有的运行时数据结构和算法只能通过内存池申请内存，保证了其使用的内存大小是固定的，不会因为运行时数据结构和算法而发生OOM。在内存吃紧的情况下，算法（sort/join等）会高效地将一大批内存块写到磁盘，之后再读回来。因此，`OutOfMemoryErrors`可以有效地被避免。
+> 1. **减少GC压力。**显而易见，因为所有常驻型数据都以二进制的形式存在 Flink 的`MemoryManager`中，**这些`MemorySegment`一直呆在老年代而不会被GC回收。其他的数据对象基本上是由用户代码生成的短生命周期对象，这部分对象可以被 Minor GC 快速回收。只要用户不去创建大量类似缓存的常驻型对象，那么老年代的大小是不会变的，Major GC也就永远不会发生。从而有效地降低了垃圾回收的压力。另外，这里的内存块还可以是堆外内存，这可以使得 JVM 内存更小，从而加速垃圾回收。**
+> 2. **避免了OOM。**所有的运行时数据结构和算法**只能通过内存池申请内存，保证了其使用的内存大小是固定的，不会因为运行时数据结构和算法而发生OOM。**在内存吃紧的情况下，算法（sort/join等）会高效地将一大批内存块写到磁盘，之后再读回来。因此，`OutOfMemoryErrors`可以有效地被避免。
 > 3. **节省内存空间。**Java 对象在存储上有很多额外的消耗（如上一节所谈）。如果只存储实际数据的二进制内容，就可以避免这部分消耗。
 > 4. **高效的二进制操作 & 缓存友好的计算。**二进制数据以定义好的格式存储，可以高效地比较与操作。另外，该二进制形式可以把相关的值，以及hash值，键值和指针等相邻地放进内存中。这使得数据结构可以对高速缓存更友好，可以从 L1/L2/L3 缓存获得性能的提升（下文会详细解释）。
 >
 > ## 为 Flink 量身定制的序列化框架
 >
-> 目前 Java 生态圈提供了众多的序列化框架：Java serialization, Kryo, Apache Avro 等等。但是 Flink 实现了自己的序列化框架。因为在 Flink 中处理的数据流通常是同一类型，由于数据集对象的类型固定，对于数据集可以只保存一份对象Schema信息，节省大量的存储空间。同时，对于固定大小的类型，也可通过固定的偏移位置存取。当我们需要访问某个对象成员变量的时候，通过定制的序列化工具，并不需要反序列化整个Java对象，而是可以直接通过偏移量，只是反序列化特定的对象成员变量。如果对象的成员变量较多时，能够大大减少Java对象的创建开销，以及内存数据的拷贝大小。
+> 目前 Java 生态圈提供了众多的序列化框架：Java serialization, Kryo, Apache Avro 等等。但是 Flink 实现了自己的序列化框架。因为在 Flink 中处理的数据流通常是同一类型，**由于数据集对象的类型固定，对于数据集可以只保存一份对象Schema信息，节省大量的存储空间。同时，对于固定大小的类型，也可通过固定的偏移位置存取。当我们需要访问某个对象成员变量的时候，通过定制的序列化工具，并不需要反序列化整个Java对象，而是可以直接通过偏移量，只是反序列化特定的对象成员变量。**如果对象的成员变量较多时，能够大大减少Java对象的创建开销，以及内存数据的拷贝大小。
 >
-> 对于可以用作key的数据类型，Flink还同时自动生成TypeComparator，用来辅助直接对序列化后的二进制数据进行compare、hash等操作。对于 Tuple、CaseClass、POJO 等组合类型，其TypeSerializer和TypeComparator也是组合的，序列化和比较时会委托给对应的serializers和comparators。如下图展示 一个内嵌型的Tuple3<Integer,Double,Person> 对象的序列化过程。
+> **对于可以用作key的数据类型，Flink还同时自动生成TypeComparator，用来辅助直接对序列化后的二进制数据进行compare、hash等操作。对于 Tuple、CaseClass、POJO 等组合类型，其TypeSerializer和TypeComparator也是组合的，序列化和比较时会委托给对应的serializers和comparators。**如下图展示 一个内嵌型的Tuple3<Integer,Double,Person> 对象的序列化过程。
 >
 > ![image-20210302165212834](./flink_note.assets/image-20210302165212834.png)
 >
 > 可以看出这种序列化方式存储密度是相当紧凑的。其中 int 占4字节，double 占8字节，POJO多个一个字节的header，PojoSerializer只负责将header序列化进去，并委托每个字段对应的serializer对字段进行序列化。
 >
-> Flink 的类型系统可以很轻松地扩展出自定义的TypeInformation、Serializer以及Comparator，来提升数据类型在序列化和比较时的性能。
+> **Flink 的类型系统可以很轻松地扩展出自定义的TypeInformation、Serializer以及Comparator，来提升数据类型在序列化和比较时的性能。**
 >
 > ## Flink 如何直接操作二进制数据
 >
@@ -909,15 +909,15 @@ You can configure the number of samples for the job manager with the following c
 >
 > 随着磁盘IO和网络IO越来越快，CPU逐渐成为了大数据领域的瓶颈。从 L1/L2/L3 缓存读取数据的速度比从主内存读取数据的速度快好几个量级。
 >
-> Flink 通过定制的序列化框架将算法中需要操作的数据（如sort中的key）连续存储，而完整数据存储在其他地方。因为对于完整的数据来说，key+pointer更容易装进缓存，这大大提高了缓存命中率，从而提高了基础算法的效率。这对于上层应用是完全透明的，可以充分享受缓存友好带来的性能提升。
+> Flink 通过定制的**序列化框架将算法中需要操作的数据（如sort中的key）连续存储**，而完整数据存储在其他地方。**因为对于完整的数据来说，key+pointer更容易装进缓存，这大大提高了缓存命中率，从而提高了基础算法的效率。**这对于上层应用是完全透明的，可以充分享受缓存友好带来的性能提升。
 >
 > ## 走向堆外内存
 >
 > Flink 基于堆内存的内存管理机制已经可以解决很多JVM现存问题了，为什么还要引入堆外内存？
 >
-> 1. 启动超大内存（上百GB）的JVM需要很长时间，GC停留时间也会很长（分钟级）。使用堆外内存的话，可以极大地减小堆内存（只需要分配Remaining Heap那一块），使得 TaskManager 扩展到上百GB内存不是问题。
-> 2. 高效的 IO 操作。堆外内存在写磁盘或网络传输时是 zero-copy，而堆内存的话，至少需要 copy 一次。
-> 3. 堆外内存是进程间共享的。也就是说，即使JVM进程崩溃也不会丢失数据。这可以用来做故障恢复（Flink暂时没有利用起这个，不过未来很可能会去做）。
+> 1. **启动超大内存（上百GB）的JVM需要很长时间，GC停留时间也会很长（分钟级）**。使**用堆外内存的话，可以极大地减小堆内存（只需要分配Remaining Heap那一块），使得 TaskManager 扩展到上百GB内存不是问题。**
+> 2. **高效的 IO 操作。**堆外内存在写磁盘或网络传输时是 zero-copy，而堆内存的话，至少需要 copy 一次。
+> 3. **堆外内存是进程间共享的。**也就是说，即使JVM进程崩溃也不会丢失数据。这可以用来做故障恢复（Flink暂时没有利用起这个，不过未来很可能会去做）。
 >
 > 但是强大的东西总是会有其负面的一面，不然为何大家不都用堆外内存呢。
 >
@@ -927,7 +927,7 @@ You can configure the number of samples for the job manager with the following c
 >
 > Flink用通过`ByteBuffer.allocateDirect(numBytes)`来申请堆外内存，用 `sun.misc.Unsafe` 来操作堆外内存。
 >
-> 基于 Flink 优秀的设计，实现堆外内存是很方便的。Flink 将原来的 `MemorySegment` 变成了抽象类，并生成了两个子类。`HeapMemorySegment` 和 `HybridMemorySegment`。从字面意思上也很容易理解，前者是用来分配堆内存的，后者是用来分配堆外内存**和堆内存**的。是的，你没有看错，后者既可以分配堆外内存又可以分配堆内存。为什么要这样设计呢？
+> 基于 Flink 优秀的设计，实现堆外内存是很方便的。**Flink 将原来的 `MemorySegment` 变成了抽象类，并生成了两个子类。`HeapMemorySegment` 和 `HybridMemorySegment`。**从字面意思上也很容易理解，前者是用来分配堆内存的，后者是用来分配堆外内存**和堆内存**的。是的，你没有看错，后者既可以分配堆外内存又可以分配堆内存。为什么要这样设计呢？
 >
 > Flink 使用了两种方案：
 >
@@ -943,11 +943,15 @@ You can configure the number of samples for the job manager with the following c
 > sun.misc.Unsafe.getLong(Object reference, long offset) 
 > ```
 >
-> - 如果reference不为空，则会取该对象的地址，加上后面的offset，从相对地址处取出8字节并得到 long。这对应了堆内存的场景。
-> - 如果reference为空，则offset就是要操作的绝对地址，从该地址处取出数据。这对应了堆外内存的场景。
+> - **如果reference不为空，则会取该对象的地址，加上后面的offset，从相对地址处取出8字节并得到 long。这对应了堆内存的场景。**
+> - **如果reference为空，则offset就是要操作的绝对地址，从该地址处取出数据。这对应了堆外内存的场景。**
 
 ## [Flink Timer（定时器）机制与其具体实现](https://www.jianshu.com/p/9ae1d2974304?utm_campaign=hugo)（重要）
 
+>org.apache.flink.streaming.api.TimerService
+>
+>org.apache.flink.streaming.api.operators.InternalTimerService
+>
 >org.apache.flink.streaming.api.operators.InternalTimeServiceManagerImpl
 >
 >中使用一个hashmap管理 Timer 的实现 InternalTimerServiceImpl
@@ -1003,30 +1007,30 @@ You can configure the number of samples for the job manager with the following c
 >TimerHeapInternalTimer的实现比较简单，主要就是4个字段和1个方法。为了少打点字，把注释也弄过来。
 >
 >```java
->   /**
->    * The key for which the timer is scoped.
->    */
->   @Nonnull
->   private final K key;
->   /**
->    * The namespace for which the timer is scoped.
->    */
->   @Nonnull
->   private final N namespace;
->   /**
->    * The expiration timestamp.
->    */
->   private final long timestamp;
->   /**
->    * This field holds the current physical index of this timer when it is managed by a timer heap so that we can
->    * support fast deletes.
->    */
->   private transient int timerHeapIndex;
+>  /**
+>   * The key for which the timer is scoped.
+>   */
+>  @Nonnull
+>  private final K key;
+>  /**
+>   * The namespace for which the timer is scoped.
+>   */
+>  @Nonnull
+>  private final N namespace;
+>  /**
+>   * The expiration timestamp.
+>   */
+>  private final long timestamp;
+>  /**
+>   * This field holds the current physical index of this timer when it is managed by a timer heap so that we can
+>   * support fast deletes.
+>   */
+>  private transient int timerHeapIndex;
 >
->   @Override
->   public int comparePriorityTo(@Nonnull InternalTimer<?, ?> other) {
->       return Long.compare(timestamp, other.getTimestamp());
->   }
+>  @Override
+>  public int comparePriorityTo(@Nonnull InternalTimer<?, ?> other) {
+>      return Long.compare(timestamp, other.getTimestamp());
+>  }
 >}
 >```
 >
@@ -1039,16 +1043,16 @@ You can configure the number of samples for the job manager with the following c
 >再来看事件时间的情况。事件时间与内部时间戳无关，而与水印有关。以下是InternalTimerServiceImpl.advanceWatermark() 方法的代码。
 >
 >```java
->   public void advanceWatermark(long time) throws Exception {
->       currentWatermark = time;
->       InternalTimer<K, N> timer;
+>  public void advanceWatermark(long time) throws Exception {
+>      currentWatermark = time;
+>      InternalTimer<K, N> timer;
 >
->       while ((timer = eventTimeTimersQueue.peek()) != null && timer.getTimestamp() <= time) {
->           eventTimeTimersQueue.poll();
->           keyContext.setCurrentKey(timer.getKey());
->           triggerTarget.onEventTime(timer);
->       }
->   }
+>      while ((timer = eventTimeTimersQueue.peek()) != null && timer.getTimestamp() <= time) {
+>          eventTimeTimersQueue.poll();
+>          keyContext.setCurrentKey(timer.getKey());
+>          triggerTarget.onEventTime(timer);
+>      }
+>  }
 >```
 >
 >该逻辑与处理时间相似，只不过从回调onProcessingTime()变成了回调onEventTime()而已。然后追踪它的调用链，回到InternalTimeServiceManager的同名方法,用户自定义的onTimer()逻辑也就被执行了。
@@ -1061,9 +1065,9 @@ You can configure the number of samples for the job manager with the following c
 >package org.apache.flink.streaming.runtime.tasks;
 >
 >/**
-> * A {@link TimerService} which assigns as current processing time the result of calling
-> * {@link System#currentTimeMillis()} and registers timers using a {@link ScheduledThreadPoolExecutor}.
-> */
+>* A {@link TimerService} which assigns as current processing time the result of calling
+>* {@link System#currentTimeMillis()} and registers timers using a {@link ScheduledThreadPoolExecutor}.
+>*/
 >@Internal
 >public class SystemProcessingTimeService implements TimerService {
 >
@@ -1077,11 +1081,11 @@ You can configure the number of samples for the job manager with the following c
 >
 >	/** The executor service that schedules and calls the triggers of this task. */
 >	private final ScheduledThreadPoolExecutor timerService;
->  
->  ......
->  ......
->  ......
->  ......
+>
+> ......
+> ......
+> ......
+> ......
 >@Override
 >	public ScheduledFuture<?> registerTimer(long timestamp, ProcessingTimeCallback callback) {
 >
@@ -1113,29 +1117,29 @@ You can configure the number of samples for the job manager with the following c
 >
 >
 >```java
->   public void advanceWatermark(Watermark watermark) throws Exception {
->       for (InternalTimerServiceImpl<?, ?> service : timerServices.values()) {
->           service.advanceWatermark(watermark.getTimestamp());
->       }
->   }
+>  public void advanceWatermark(Watermark watermark) throws Exception {
+>      for (InternalTimerServiceImpl<?, ?> service : timerServices.values()) {
+>          service.advanceWatermark(watermark.getTimestamp());
+>      }
+>  }
 >```
 >
 >继续向上追溯，到达终点：算子基类AbstractStreamOperator中处理水印的方法processWatermark()。当水印到来时，就会按着上述调用链流转到InternalTimerServiceImpl中，并触发所有早于水印时间戳的Timer了。
 >
 >```java
->   public void processWatermark(Watermark mark) throws Exception {
->       if (timeServiceManager != null) {
->           timeServiceManager.advanceWatermark(mark);
->       }
->       output.emitWatermark(mark);
->   }
+>  public void processWatermark(Watermark mark) throws Exception {
+>      if (timeServiceManager != null) {
+>          timeServiceManager.advanceWatermark(mark);
+>      }
+>      output.emitWatermark(mark);
+>  }
 >```
 >
 >**（重要）所以，时间时间中，触发timer的方式是当数据流中收到 Watermark后，每个时间服务都会检查 计时器队列，将timestamp小于 Watermark 的计时器都触发**
 >
 >至此，我们算是基本打通了 Flink Timer 机制的实现细节，well done
 
-### Flink Timer（定时器）机制（自我总结）
+## Flink Timer（定时器）机制（自我总结）
 
 1. 负责实际执行KeyedProcessFunction的算子是KeyedProcessOperator，KeyedProcessOperator中的 timerService 具体实现是InternalTimerService。
 
