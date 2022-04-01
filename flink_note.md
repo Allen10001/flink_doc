@@ -1,6 +1,28 @@
+
+
+# 记录
+
+## [Flink 消费 Kafka 分区顺序性问题](https://cf.jd.com/pages/viewpage.action?pageId=644730231)
+
+https://cf.jd.com/pages/viewpage.action?pageId=644730231
+
 # 问题
 
 ### 什么是数据倾斜
+
+### Funtion 中的局部变量是如何处理的？？
+
+[Difference between Flink state and ordinary class variables](https://stackoverflow.com/questions/60143785/difference-between-flink-state-and-ordinary-class-variables)
+
+>Failure recovery, redeployments, and rescaling are some of the big differences.
+>
+>Flink takes periodic checkpoints of the state it is managing. In the event of a failure, your job can automatically recover using the latest checkpoint, and resume processing. You can also manually trigger a state snapshot (called a savepoint in this case) and use it to restart after a redeployment. While you are at it, you can also rescale the cluster up or down.
+>
+>You can also choose where your Flink state lives -- either as objects on the heap, or as serialized bytes on disk. Thus it is possible to have much more state than can fit in memory.
+>
+>From an operational perspective, this is more like having your data in a database, than in memory. But from a performance perspective, it's more like using variables: the state is always local, available with high throughput and low latency.
+>
+>In addition to what David wrote, ValueState is scoped to the key while a regular field is scoped to **the operator instance.** 
 
 [面试必问&数据倾斜](https://zhuanlan.zhihu.com/p/64240857)
 
@@ -539,6 +561,14 @@ You can configure the number of samples for the job manager with the following c
 
 # 学习文章
 
+## 从源码看项目中flink processfunction调用过程 ？？
+
+https://zhuanlan.zhihu.com/p/90721680
+
+>
+>
+>
+
 ## [Flink新特性之非对齐检查点（unaligned checkpoint）简介](https://blog.csdn.net/nazeniwaresakini/article/details/107954076)
 
 >非对齐检查点
@@ -945,6 +975,30 @@ You can configure the number of samples for the job manager with the following c
 >
 > - **如果reference不为空，则会取该对象的地址，加上后面的offset，从相对地址处取出8字节并得到 long。这对应了堆内存的场景。**
 > - **如果reference为空，则offset就是要操作的绝对地址，从该地址处取出数据。这对应了堆外内存的场景。**
+>
+> Unsafe 类不能直接由应用类加载器直接加载到，flink 通过反射获取。
+>
+> org.apache.flink.core.memory.MemoryUtils#getUnsafe
+>
+> ```java
+> private static sun.misc.Unsafe getUnsafe() {
+> 		try {
+> 			Field unsafeField = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
+> 			unsafeField.setAccessible(true);
+> 			return (sun.misc.Unsafe) unsafeField.get(null);
+> 		} catch (SecurityException e) {
+> 			throw new Error("Could not access the sun.misc.Unsafe handle, permission denied by security manager.", e);
+> 		} catch (NoSuchFieldException e) {
+> 			throw new Error("The static handle field in sun.misc.Unsafe was not found.", e);
+> 		} catch (IllegalArgumentException e) {
+> 			throw new Error("Bug: Illegal argument reflection access for static field.", e);
+> 		} catch (IllegalAccessException e) {
+> 			throw new Error("Access to sun.misc.Unsafe is forbidden by the runtime.", e);
+> 		} catch (Throwable t) {
+> 			throw new Error("Unclassified error while trying to access the sun.misc.Unsafe handle.", t);
+> 		}
+> 	}
+> ```
 
 ## [Flink Timer（定时器）机制与其具体实现](https://www.jianshu.com/p/9ae1d2974304?utm_campaign=hugo)（重要）
 
@@ -962,7 +1016,7 @@ You can configure the number of samples for the job manager with the following c
 >
 >	private final boolean useLegacySynchronousSnapshots;
 >
->	private InternalTimeServiceManagerImpl(
+>	private InternalTimerServiceManagerImpl(
 >		KeyGroupRange localKeyGroupRange,
 >		KeyContext keyContext,
 >		PriorityQueueSetFactory priorityQueueSetFactory,
@@ -1822,7 +1876,7 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
 - MemoryStateBackend
 
-  - 内存级别的状态后端，会将键控状态作为内存中的对象进行管理，将它们存在TaskManager 的 JVM 堆上，而将 checkpoint 存储在JobManager 的内存中。
+  - 内存级别的状态后端，会将键控状态作为内存中的对象进行管理，将它们存在TaskManager 的 JVM 堆上，而将 **checkpoint 存储在JobManager 的内存中**。
   - 快速访问，低延迟，容错率低
 
 - FsStateBackend
@@ -1885,11 +1939,11 @@ Kafka数据汇允许你自定义分区器，默认的分区器会将每个数据
 
 * GenerticWriteAheadSink
 
-每个检查点周期内所有需要写出的记录先存到算子状态中，该状态会被写出到检查点，并在故障时进行恢复。当一个任务接收到检查点完成通知时，会将此次检查点周期内所有记录写入外部系统。
+每个检查点周期内所有需要写出的记录先存到算子状态中，该状态会被**写出到检查点**，并在故障时进行恢复。当一个任务接收到检查点完成通知时，会将此次检查点周期内所有记录写入外部系统。
 
 * TwoPhaseCommitSinkFunction
 
-每个检查点都会开启一个新的事务，并以当前事务为上下文将所有后续记录写入数据汇系统。数据汇在接收到对应检查点完成通知后才会提交事务。
+每个检查点都会开启一个新的事务，并以当前事务为上下文将所有后续记录**写入数据汇系统**。数据汇在接收到对应检查点完成通知后才会提交事务。
 
 ## P253 部署模式
 
@@ -1909,11 +1963,11 @@ Flink 集群启动后只会运行单个作业，一旦作业结束，集群就�
 
 ## 284 保存点
 
-保存点和检查点的本质相同，都是应用状态的一致性完整快照。但他们的生命周期有所差异，检查点会自动创建，在发生故障时自动加载并由Flink自动删除（取决于应用具体配置）。此外，除非指定要保留检查点，否则他们会在应用取消时自动删除。
+**保存点和检查点的本质相同，都是应用状态的一致性完整快照。但他们的生命周期有所差异，检查点会自动创建，在发生故障时自动加载并由Flink自动删除（取决于应用具体配置）。此外，除非指定要保留检查点，否则他们会在应用取消时自动删除。**
 
 保存点相反，需要手动触发，也需要手动手动删除，永远不会被Flink自动删除。
 
-每个保存点对应一个持久化存储上的一个目录。
+**每个保存点对应一个持久化存储上的一个目录。**
 
 
 
