@@ -881,7 +881,7 @@ https://zhuanlan.zhihu.com/p/90721680
 >taskmanager.memory.off-heap: false
 >```
 >
->- 空闲内存（Free）：虽然名为空闲，但实际上是存储用户代码和数据结构的，固定在堆内，可以理解为堆内内存除去托管内存后剩下的那部分。
+>- 空闲内存（Free）：虽然名为空闲，**但实际上是存储用户代码和数据结构的**，固定在堆内，可以理解为堆内内存除去托管内存后剩下的那部分。
 >
 
 ## h3 [flink的 memorysegment](https://blog.csdn.net/zhoucs86/article/details/91049219)（全面、重要）
