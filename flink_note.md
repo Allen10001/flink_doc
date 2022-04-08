@@ -8,6 +8,16 @@ https://cf.jd.com/pages/viewpage.action?pageId=644730231
 
 # 问题
 
+### [Non Serializable object in Apache Flink](https://stackoverflow.com/questions/59713451/non-serializable-object-in-apache-flink)
+
+>Using `open` is usually the right place to load external lookup sources. The timeout is a bit odd, maybe there is a configuration around it.
+>
+>**However, if it's huge using a static loader (either static class as you did or singleton) has the benefit that you only need to load it once for all parallel instances of the task on the same task manager. Hence, you save memory and CPU time. This is especially true for you, as you use the same data structure in two separate tasks. Further, the static loader can be lazily initialized when it's used for the first time to avoid the timeout in `open`.**
+>
+>The clear downside of this approach is that the testability of your code suffers. There are some ways around that, which I could expand if there is interest.
+>
+>I don't see a benefit of using the proxy serializer pattern. It's unnecessarily complex (custom serialization in Java) and offers little benefit.
+
 ### 什么是数据倾斜
 
 ### Funtion 中的局部变量是如何处理的？？
