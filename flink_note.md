@@ -569,7 +569,41 @@ You can configure the number of samples for the job manager with the following c
 >
 >
 
-# 学习文章
+# 学习
+
+## [Flink Checkpoint超时问题常见排查思路](https://blog.csdn.net/cheyanming123/article/details/100565210)
+
+>
+>
+>
+
+## [Flink 类型和序列化机制简介](https://cloud.tencent.com/developer/article/1240444)
+
+>
+>
+
+## [FLINK 中AggregateFunction里面的四个方法中的merge方法是做什么用的？](https://www.zhihu.com/question/346639699)
+
+>作者：星哥
+>链接：https://www.zhihu.com/question/346639699/answer/977856761
+>来源：知乎
+>著作权归作者所有。商业转载请联系作者获得授权，非商业转载请注明出处。
+>
+>AggregateFunction中的merge方法仅SessionWindow会调用该方法，如果time window是不会调用的，merge方法即使返回null也是可以的。可以看看官方的文档中的描述和结合翻看源码就可以搞清楚了
+>
+>![img](flink_note.assets/v2-4ea9c13a79aa854ddd6cf0a458472406_720w-20220414163407768.jpg)![img](flink_note.assets/v2-4ea9c13a79aa854ddd6cf0a458472406_720w.jpg)
+>
+>官网中的描述大概的意思是：因为会话窗口没有固定的起始时间和结束时间，他们被运算不同于滚动窗口和滑动窗口。**本质上，会话窗口会为每一批相邻两条数据没有大于指定间隔时间的数据merge到以一起。**为了数据能够被merge，会话窗口需要一个merge的触发器和一个可以merge的WindowFunction，比如ReduceFunction、AggregateFunction或者ProcessWindowFunction，需要注意的是FoldFunction不能merge！
+>
+>只有SessionWindow才会调用AggregateFunction的merge方法！！！
+
+## [从AggregateFunction.merge()到Flink会话窗口实现原理](https://blog.csdn.net/nazeniwaresakini/article/details/108576534)
+
+>![image-20220413144120788](flink_note.assets/image-20220413144120788.png)
+>
+>在普通的翻滚窗口和滑动窗口中，窗口的范围是按时间区间固定的，虽然范围有可能重合，但是处理起来是各自独立的，并不会相互影响。但是会话窗口则不同，其范围是根据事件之间的时间差是否超过gap来确定的（超过gap就形成一个新窗口），也就是说并非固定。所以，我们需要在每个事件进入会话窗口算子时就为它分配一个初始窗口，起点是它本身所携带的时间戳（这里按event time处理），终点则是时间戳加上gap的偏移量。这样的话，如果两个事件所在的初始窗口没有相交，说明它们属于不同的会话；如果相交，则说明它们属于同一个会话，并且要把这两个初始窗口合并在一起，作为新的会话窗口。多个事件则依次类推，最终形成上面图示的情况。
+
+
 
 ## 从源码看项目中flink processfunction调用过程 ？？
 
@@ -1491,7 +1525,7 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 >
 >为了更高效地分布式执行，Flink 会尽可能地将 operator 的 subtask 链接（chain）在一起形成 task，每个 task 在一个线程中执行。将 operators 链接成 task 是非常有效的优化：它能减少线程之间的切换，减少消息的序列化/反序列化，减少数据在缓冲区的交换，减少了延迟的同时提高整体的吞吐量。
 >
->Flink 会在生成 JobGraph 阶段，将代码中可以优化的算子优化成一个算子链（Operator Chains）以放到一个 task（一个线程）中执行，以减少线程之间的切换和缓冲的开销，提高整体的吞吐量和延迟。
+>Flink 会在生成 **JobGraph 阶段**，将代码中可以优化的算子优化成一个算子链（Operator Chains）以放到一个 task（一个线程）中执行，以减少线程之间的切换和缓冲的开销，提高整体的吞吐量和延迟。
 >
 >**二、Slot Sharing（槽位共享）**
 >
