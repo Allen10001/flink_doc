@@ -1920,7 +1920,7 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
 - MemoryStateBackend
 
-  - 内存级别的状态后端，会将键控状态作为内存中的对象进行管理，将它们存在TaskManager 的 JVM 堆上，而将 **checkpoint 存储在JobManager 的内存中**。
+  - 内存级别的状态后端，**会将键控状态作为内存中的对象进行管理，将它们存在TaskManager 的 JVM 堆上**，而将 **checkpoint 存储在JobManager 的内存中**。
   - 快速访问，低延迟，容错率低
 
 - FsStateBackend
@@ -1937,7 +1937,7 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
   
 
-  FileSystem state backend与RocksDB state backend支持异步做检查点。当一个检查点被触发时，state backend在本地创建一个检查点的副本。在本地副本创建完成后，task继续它的正常处理。一个后端线程会异步地复制本地快照到远端存储，并在它完成检查点后提醒task。异步检查点可以显著地降低一个task从暂停到继续处理数据，这中间的时间。另外，RocksDB state backend也有增量检查点的功能，可以减少数据的传输量。
+  FileSystem state backend与RocksDB state backend支持 异步做检查点。当一个检查点被触发时，state backend 在本地创建一个检查点的副本。在本地副本创建完成后，task继续它的正常处理。一个后端线程会异步地复制本地快照到远端存储，并在它完成检查点后提醒task。异步检查点可以显著地降低一个task从暂停到继续处理数据，这中间的时间。另外，RocksDB state backend也有增量检查点的功能，可以减少数据的传输量。
 
 ## P68 对有状态算子的扩缩容
 
