@@ -143,7 +143,7 @@ https://gitlab.bigdata.letv.com/data-realtime/rdp.jobs.mob   中的 rdp.mob.ios.
 
 ### flink中元素的序列化
 
- * 流中的元素不需要专门实现 Serializable 接口，Flink有一套类型处理系统，可以专门提取流中的元素类型，获取序列化器和反序列化器。
+ * 流中的元素不需要专门实现 Serializable 接口，Flink有一套类型处理系统，可以专门**提取流中的元素类型**，获取序列化器和反序列化器。
  * 但是从主线程向算子中传变量时，该变量需要实现 Serializable 接口，flink 没有对这种变量的序列化和反序列化做自动的处理。
 
 ### [为什么Flink中的函数需要序列化?](https://www.runexception.com/q/12332)
@@ -570,6 +570,468 @@ You can configure the number of samples for the job manager with the following c
 >
 
 # 学习
+
+## flink 源码分析系列文章
+
+https://matt33.com/categories/%E6%8A%80%E6%9C%AF/
+
+## TaskManager 启动流程
+
+http://matt33.com/2020/03/15/flink-taskmanager-7/
+
+>启动类 TaskManagerRunner 的启动流程：
+>
+>![image-20220521122515560](flink_note.assets/image-20220521122515560.png)
+>
+>TaskManager 启动的入口方法是 `runTaskManager()`，它会首先初始化 TaskManager 一些相关的服务，比如：初始化 RpcService、初始化 HighAvailabilityServices 等等，这些都是为 TaskManager 服务的启动做相应的准备工作。其实 TaskManager 初始化主要分为下面两大块：
+>
+>1. **TaskManager 相关 service 的初始化**：比如：内存管理器、IO 管理器、TaskSlotTable（TaskSlot 的管理是在这里进行的）等，这里也包括 TaskExecutor 的初始化，注意这里对于一些需要启动的服务在这一步并没有启动；
+>2. **TaskExecutor 的启动**：它会启动 TM 上相关的服务，Task 的提交和运行也是在 TaskExecutor 中处理的，上一步 TM 初始化的那些服务也是在 TaskExecutor 中使用的。
+>
+>TM 的服务真正 Run 起来之后，核心流程还是在 `TaskExecutor` 中。
+>
+>真正在 TaskManager 中处理复杂繁琐工作的组件是 **TaskExecutor**，这个才是 TaskManager 的核心。
+>
+>其 `onStart()` 具体实现如下：
+>
+>```java
+>//note: 启动服务
+>@Override
+>public void onStart() throws Exception {
+>    try {
+>        //note: 启动 TM 的相关服务
+>        startTaskExecutorServices();
+>    } catch (Exception e) {
+>        final TaskManagerException exception = new TaskManagerException(String.format("Could not start the TaskExecutor %s", getAddress()), e);
+>        onFatalError(exception);
+>        throw exception;
+>    }
+>
+>    //note: 注册超时检测，如果超时还未注册完成，就抛出错误，启动失败
+>    startRegistrationTimeout();
+>}
+>```
+>
+>这里，主要分为两个部分：
+>
+>1. `startTaskExecutorServices()`: 启动 TaskManager 相关的服务，结合流程图主要是四大块：
+>   - 启动心跳服务；
+>   - 向 Flink Master 的 ResourceManager 注册 TaskManager；
+>   - 启动 TaskSlotTable 服务（TaskSlot 的维护主要在这个服务中）；
+>   - 启动 JobLeaderService 服务，它主要是监控各个作业 JobManager leader 的变化；
+>2. `startRegistrationTimeout()`: 启动注册超时的检测，默认是5 min，如果超过这个时间还没注册完成，就会抛出异常退出进程，启动失败。
+>
+>TaskExecutor 启动的核心实现是在 `startTaskExecutorServices()` 中，其实现如下：
+>
+>```java
+>private void startTaskExecutorServices() throws Exception {
+>    try {
+>        //note: 启动心跳服务
+>        startHeartbeatServices();
+>
+>        //note: 与集群的 ResourceManager 建立连接（并创建一个 listener）
+>        // start by connecting to the ResourceManager
+>        resourceManagerLeaderRetriever.start(new ResourceManagerLeaderListener());
+>
+>        // tell the task slot table who's responsible for the task slot actions
+>        //note: taskSlotTable 启动
+>        taskSlotTable.start(new SlotActionsImpl());
+>
+>        // start the job leader service
+>        //note: 启动 job leader 服务
+>        jobLeaderService.start(getAddress(), getRpcService(), haServices, new JobLeaderListenerImpl());
+>
+>        fileCache = new FileCache(taskManagerConfiguration.getTmpDirectories(), blobCacheService.getPermanentBlobService());
+>    } catch (Exception e) {
+>        handleStartTaskExecutorServicesException(e);
+>    }
+>}
+>```
+>
+>#### 1. 启动心跳服务
+>
+>TaskExecutor 启动的第一个服务就是 HeartbeatManager，这里会启动两个：
+>
+>1. `jobManagerHeartbeatManager`: 用于与 JobManager（如果 Job 有 task 在这个 TM 上，这个 Job 的 JobManager 就与 TaskManager 有心跳通信）之间的心跳通信管理，如果 timeout，这里会重连；
+>2. `resourceManagerHeartbeatManager`:用于与 ResourceManager 之间的通信管理，如果 timeout，这里也会重连。
+>
+>#### 2. 向 RM 注册 TM
+>
+>TaskManger 向 ResourceManager 注册是通过 `ResourceManagerLeaderListener` 来完成的，它会监控 ResourceManager 的 leader 变化，如果有新的 leader 被选举出来，将会调用 `notifyLeaderAddress()` 方法去触发与 ResourceManager 的重连，其实现如下：
+>
+>```java
+>// TaskExecutor.java
+>/**
+> * The listener for leader changes of the resource manager.
+> * note：监控 ResourceManager leader 变化的 listener
+> */
+>private final class ResourceManagerLeaderListener implements LeaderRetrievalListener {
+>
+>    //note: 如果 leader 被选举处理（包括挂掉之后重新选举），将会调用这个方法通知 TM
+>    @Override
+>    public void notifyLeaderAddress(final String leaderAddress, final UUID leaderSessionID) {
+>        runAsync(
+>            () -> notifyOfNewResourceManagerLeader(
+>                leaderAddress,
+>                ResourceManagerId.fromUuidOrNull(leaderSessionID)));
+>    }
+>
+>    @Override
+>    public void handleError(Exception exception) {
+>        onFatalError(exception);
+>    }
+>}
+>
+>
+>//note: 如果 RM 的 new leader 选举出来了，这里会新创建一个 ResourceManagerAddress 对象，并重新建立连接
+>private void notifyOfNewResourceManagerLeader(String newLeaderAddress, ResourceManagerId newResourceManagerId) {
+>    resourceManagerAddress = createResourceManagerAddress(newLeaderAddress, newResourceManagerId);
+>    reconnectToResourceManager(new FlinkException(String.format("ResourceManager leader changed to new address %s", resourceManagerAddress)));
+>}
+>
+>
+>
+>//note: 重新与 ResourceManager 连接（可能是 RM leader 切换）
+>private void reconnectToResourceManager(Exception cause) {
+>    closeResourceManagerConnection(cause);
+>    //note: 注册超时检测，如果 timeout 还没注册成功，这里就会 failed
+>    startRegistrationTimeout();
+>    //note: 与 RM 重新建立连接
+>    tryConnectToResourceManager();
+>}
+>
+>
+>//note: 建立与 ResourceManager 的连接
+>private void tryConnectToResourceManager() {
+>    if (resourceManagerAddress != null) {
+>        connectToResourceManager();
+>    }
+>}
+>
+>
+>//note: 与 ResourceManager 建立连接
+>private void connectToResourceManager() {
+>    assert(resourceManagerAddress != null);
+>    assert(establishedResourceManagerConnection == null);
+>    assert(resourceManagerConnection == null);
+>
+>    log.info("Connecting to ResourceManager {}.", resourceManagerAddress);
+>
+>    //note: 与 RM 建立连接
+>    resourceManagerConnection =
+>        new TaskExecutorToResourceManagerConnection(
+>            log,
+>            getRpcService(),
+>            getAddress(),
+>            getResourceID(),
+>            taskManagerConfiguration.getRetryingRegistrationConfiguration(),
+>            taskManagerLocation.dataPort(),
+>            hardwareDescription,
+>            resourceManagerAddress.getAddress(),
+>            resourceManagerAddress.getResourceManagerId(),
+>            getMainThreadExecutor(),
+>            new ResourceManagerRegistrationListener());
+>    resourceManagerConnection.start();
+>}
+>```
+>
+>在上面的最后一步，**创建了 `TaskExecutorToResourceManagerConnection` 对象，它启动后，会向 ResourceManager 注册 TM**，具体的方法实现如下：
+>
+>```java
+>// TaskExecutorToResourceManagerConnection.java
+>@Override
+>protected CompletableFuture<RegistrationResponse> invokeRegistration(
+>        ResourceManagerGateway resourceManager, ResourceManagerId fencingToken, long timeoutMillis) throws Exception {
+>
+>    Time timeout = Time.milliseconds(timeoutMillis);
+>    return resourceManager.registerTaskExecutor(
+>        taskExecutorAddress,
+>        resourceID,
+>        dataPort,
+>        hardwareDescription,
+>        timeout);
+>}
+>```
+>
+>**ResourceManager 在收到这个请求，会做相应的处理，主要要做的事情就是：先从缓存里移除旧的 TM 注册信息（如果之前存在的话），然后再更新缓存，并增加心跳监控，只有这些工作完成之后，TM 的注册才会被认为是成功的。**
+>
+>#### 3. 启动 TaskSlotTable 服务  (这块比较重要)
+>
+>TaskSlotTable 从名字也可以看出，它主要是为 TaskSlot 服务的，它主要的功能有以下三点：
+>
+>1. 维护这个 TM 上所有 TaskSlot 与 Task、及 Job 的关系；
+>2. 维护这个 TM 上所有 TaskSlot 的状态；
+>3. TaskSlot 在进行 allocate/free 操作，通过 **TimeService** 做超时检测。
+>
+>先看下 TaskSlotTable 是如何初始化的：
+>
+>```java
+>// TaskManagerServices.java
+>//note: 当前 TM 拥有的 slot 及每个 slot 的资源信息
+>//note: TM 的 slot 数由 taskmanager.numberOfTaskSlots 决定，默认是 1
+>final int numOfSlots = taskManagerServicesConfiguration.getNumberOfSlots();
+>final List<ResourceProfile> resourceProfiles =
+>    Collections.nCopies(numOfSlots, computeSlotResourceProfile(numOfSlots, managedMemorySize));
+>
+>//note: 注册一个超时（AKKA 超时设置）服务（在 TaskSlotTable 用于监控 slot 分配是否超时）
+>//note: 超时参数由 akka.ask.timeout 控制，默认是 10s
+>final TimerService<AllocationID> timerService = new TimerService<>(
+>    new ScheduledThreadPoolExecutor(1),
+>    taskManagerServicesConfiguration.getTimerServiceShutdownTimeout());
+>
+>//note: 这里会维护 slot 相关列表
+>final TaskSlotTable taskSlotTable = new TaskSlotTable(resourceProfiles, timerService);
+>```
+>
+>TaskSlotTable 的初始化，只需要两个变量：
+>
+>1. **`resourceProfiles`: TM 上每个 Slot 的资源信息；**
+>2. **`timerService`: 超时检测服务，来保证操作超时时做相应的处理。**
+>
+>TaskSlotTable 的启动流程如下：
+>
+>```java
+>// TaskExecutor.java
+>
+>// tell the task slot table who's responsible for the task slot actions
+>//note: taskSlotTable 启动
+>taskSlotTable.start(new SlotActionsImpl());
+>
+>//note: SlotActions 相关方法的实现
+>private class SlotActionsImpl implements SlotActions {
+>
+>    //note: 释放 slot 资源
+>    @Override
+>    public void freeSlot(final AllocationID allocationId) {
+>        runAsync(() ->
+>            freeSlotInternal(
+>                allocationId,
+>                new FlinkException("TaskSlotTable requested freeing the TaskSlot " + allocationId + '.')));
+>    }
+>
+>    //note: 如果 slot 相关的操作（分配/释放）失败，这里将会调用这个方法
+>    //note: 监控的手段是：操作前先注册一个 timeout 监控，操作完成后再取消这个监控，如果在这个期间 timeout 了，就会调用这个方法
+>    //note: TimeService 的 key 是 AllocationID
+>    @Override
+>    public void timeoutSlot(final AllocationID allocationId, final UUID ticket) {
+>        runAsync(() -> TaskExecutor.this.timeoutSlot(allocationId, ticket));
+>    }
+>}
+>```
+>
+>#### 4. 启动 JobLeaderService 服务
+>
+>TaskExecutor 启动的最后一步是，启动 JobLeader 服务，**这个服务通过 `JobLeaderListenerImpl` 监控 Job 的 JobManager leader 的变化**，如果 leader 被选举出来之后，这里将会与新的 JobManager leader 建立通信连接。
+>
+>```java
+>// TaskExecutor.java
+>
+>// start the job leader service
+>//note: 启动 job leader 服务
+>jobLeaderService.start(getAddress(), getRpcService(), haServices, new JobLeaderListenerImpl());
+>
+>//note: JobLeaderListener 的实现
+>private final class JobLeaderListenerImpl implements JobLeaderListener {
+>
+>    @Override
+>    public void jobManagerGainedLeadership(
+>        final JobID jobId,
+>        final JobMasterGateway jobManagerGateway,
+>        final JMTMRegistrationSuccess registrationMessage) {
+>        //note: 建立与 JobManager 的连接
+>        runAsync(
+>            () ->
+>                establishJobManagerConnection(
+>                    jobId,
+>                    jobManagerGateway,
+>                    registrationMessage));
+>    }
+>
+>    @Override
+>    public void jobManagerLostLeadership(final JobID jobId, final JobMasterId jobMasterId) {
+>        log.info("JobManager for job {} with leader id {} lost leadership.", jobId, jobMasterId);
+>
+>        runAsync(() ->
+>            closeJobManagerConnection(
+>                jobId,
+>                new Exception("Job leader for job id " + jobId + " lost leadership.")));
+>    }
+>
+>    @Override
+>    public void handleError(Throwable throwable) {
+>        onFatalError(throwable);
+>    }
+>}
+>```
+>
+>## TaskManager 提供了哪些能力/功能？
+>
+>要想知道 TaskManager 提供了哪些能力，个人认为有一个最简单有效的方法就是查看其对外提供的 API 接口，它向上层暴露哪些 API，这些 API 背后都是 TaskManager 能力的体现，TaskManager 对外的包括的 API 列表如下：
+>
+>1. `requestSlot()`: RM 向 TM 请求一个 slot 资源；
+>2. `requestStackTraceSample()`: 请求某个 task 在执行过程中的一个 stack trace 抽样；
+>3. `submitTask()`: JobManager 向 TM 提交 task；
+>4. `updatePartitions()`: 更新这个 task 对应的 Partition 信息；
+>5. `releasePartitions()`: 释放这个 job 的所有中间结果，比如 close 的时候触发；
+>6. `triggerCheckpoint()`: Checkpoint Coordinator 触发 task 的 checkpoint；
+>7. `confirmCheckpoint()`: Checkpoint Coordinator 通知 task 这个 checkpoint 完成；
+>8. `cancelTask()`: task 取消；
+>9. `heartbeatFromJobManager()`: 接收来自 JobManager 的心跳请求；
+>10. `heartbeatFromResourceManager()`: 接收来自 ResourceManager 的心跳请求；
+>11. `disconnectJobManager()`；
+>12. `disconnectResourceManager()`；
+>13. `freeSlot()`: JobManager 释放 Slot；
+>14. `requestFileUpload()`: 一些文件（log 等）的上传请求；
+>15. `requestMetricQueryServiceAddress()`: 请求 TM 的 metric query service 地址；
+>16. `canBeReleased()`: 检查 TM 是否可以被 realease；
+>
+>把上面的 API 列表分分类，大概有以下几块：
+>
+>1. **slot 的资源管理：slot 的分配/释放；**
+>2. **task 运行：接收来自 JobManager 的 task 提交、也包括该 task 对应的 Partition（中间结果）信息；**
+>3. **checkpoint 相关的处理；**
+>4. **心跳监控、连接建立等。**
+>
+>通常，可以任务 TaskManager 提供的功能主要是前三点，如下图所示：
+>
+>**![image-20220521162803213](flink_note.assets/image-20220521162803213.png)**
+>
+>## TaskManager 怎么发现 RM leader（在使用 ZK 做 HA 的情况下）？
+>
+>这个是 Flink HA 内容，Flink HA 机制是有一套统一的框架，它跟这个问题（**TM 如何维护 JobManager 的关系，如果 JobManager 挂掉，TM 会如何处理？** ）的原理是一样的，这里以 ResourceManager Leader 的发现为例简单介一下。
+>
+>这里，我们以使用 Zookeeper 模式的情况来讲述，ZooKeeper 做 HA 是业内最常用的方案，Flink 在实现并没有使用 `ZkClient` 这个包，而是使用 `curator` 来做的（有兴趣可以看下这篇文章 [跟着实例学习ZooKeeper的用法： 缓存](https://colobu.com/2014/12/15/zookeeper-recipes-by-example-5/)）。
+>
+>关于 Flink HA 的使用，可以参考官方文档——[JobManager High Availability (HA)](https://ci.apache.org/projects/flink/flink-docs-stable/ops/jobmanager_high_availability.html)。这里 TaskExecutor 在注册完 `ResourceManagerLeaderListener` 后，如果 leader 被选举出来或者有节点有变化，就通过它的 `notifyLeaderAddress()` 方法来通知 TaskExecutor，核心还是利用了 ZK 的 watcher 机制。同理， JobManager leader 的处理也是一样。
+>
+>## TM Slot 资源是如何管理的？
+>
+>TaskManager Slot 资源的管理主要是在 TaskSlotTable 中处理的，slot 资源的申请与释放都通过 它处理的，相关的流程如下图所示（图中只描述了主要逻辑，相关的异常处理没有展示在图中）：
+>
+>![image-20220521163345472](flink_note.assets/image-20220521163345472.png)
+>
+>相应的处理逻辑如下：
+>
+>1. 首先检测这个这个 RM 是否当前建立连接的 RM，如果不是，就抛出相应的异常，需要等到 TM 连接上 RM 之后才能处理 RM 上的 slot 请求；
+>2. 判断这个 slot 是否可以分配
+>   - 如果 slot 是 `FREE` 状态，就进行分配（调用 TaskSlotTable 的 `allocateSlot()` 方法），如果分配失败，就抛出相应的异常；
+>   - 如果 slot 已经分配，检查分配的是不是当前作业的 AllocationId，如果不是，也会抛出相应的异常，告诉 RM 这个 Slot 已经分配出去了；
+>3. 如果 TM 已经有了这个 JobManager 的 meta，这里会将这个 job 在这个 TM 上的 slot 分配再重新汇报给 JobManager 一次；
+>
+>而 TaskSlotTable 在处理 slot 的分配时，主要是根据内部缓存的信息做相应的检查，其 `allocateSlot()` 的方法的实现如下：
+>
+>```java
+>// TaskSlotTable.java
+>public boolean allocateSlot(int index, JobID jobId, AllocationID allocationId, Time slotTimeout) {
+>    checkInit();
+>    TaskSlot taskSlot = taskSlots.get(index);
+>    //note: 分配这个 TaskSlot
+>    boolean result = taskSlot.allocate(jobId, allocationId);
+>
+>    if (result) {
+>        //note: 分配成功，记录到缓存中
+>        // update the allocation id to task slot map
+>        allocationIDTaskSlotMap.put(allocationId, taskSlot);
+>
+>        // register a timeout for this slot since it's in state allocated
+>        timerService.registerTimeout(allocationId, slotTimeout.getSize(), slotTimeout.getUnit());
+>        // add this slot to the set of job slots
+>        Set<AllocationID> slots = slotsPerJob.get(jobId);
+>        if (slots == null) {
+>            slots = new HashSet<>(4);
+>            slotsPerJob.put(jobId, slots);
+>        }
+>
+>        slots.add(allocationId);
+>    }
+>
+>    return result;
+>}
+>```
+>
+>### slot 的释放
+>
+>这里再看下 Slot 的资源是如何释放的，代码实现如下：
+>
+>```java
+>// TaskExecutor.java
+>
+>//note: 释放这个 slot 资源
+>@Override
+>public CompletableFuture<Acknowledge> freeSlot(AllocationID allocationId, Throwable cause, Time timeout) {
+>    freeSlotInternal(allocationId, cause);
+>
+>    return CompletableFuture.completedFuture(Acknowledge.get());
+>}
+>
+>
+>//note: 将本地分配的 slot 释放掉（free the slot）
+>private void freeSlotInternal(AllocationID allocationId, Throwable cause) {
+>    checkNotNull(allocationId);
+>
+>    log.debug("Free slot with allocation id {} because: {}", allocationId, cause.getMessage());
+>
+>    try {
+>        final JobID jobId = taskSlotTable.getOwningJob(allocationId);
+>
+>        //note: 释放这个 slot
+>        final int slotIndex = taskSlotTable.freeSlot(allocationId, cause);
+>
+>        if (slotIndex != -1) {
+>            //note: 成功释放掉的情况下
+>
+>            if (isConnectedToResourceManager()) {
+>                //note: 通知 ResourceManager 这个 slot 因为被释放了，所以可以变可用了
+>                // the slot was freed. Tell the RM about it
+>                ResourceManagerGateway resourceManagerGateway = establishedResourceManagerConnection.getResourceManagerGateway();
+>
+>                resourceManagerGateway.notifySlotAvailable(
+>                    establishedResourceManagerConnection.getTaskExecutorRegistrationId(),
+>                    new SlotID(getResourceID(), slotIndex),
+>                    allocationId);
+>            }
+>
+>            if (jobId != null) {
+>                closeJobManagerConnectionIfNoAllocatedResources(jobId);
+>            }
+>        }
+>    } catch (SlotNotFoundException e) {
+>        log.debug("Could not free slot for allocation id {}.", allocationId, e);
+>    }
+>
+>    //note: 释放这个 allocationId 的相应状态信息
+>    localStateStoresManager.releaseLocalStateForAllocationId(allocationId);
+>}
+>```
+>
+>总结一下，TaskExecutor 在处理 slot 释放请求的理逻辑如下：
+>
+>1. 先调用 TaskSlotTable 的 `freeSlot()`
+>
+>    方法，尝试释放这个 slot：
+>
+>   - 如果这个 slot 没有 task 在运行，那么 slot 是可以释放的（状态更新为 `FREE`）;
+>   - 先将 slot 状态更新为 `RELEASING`，然后再遍历这个 slot 上的 task，逐个将其标记为 failed；
+>
+>2. 如果 slot 被成功释放（状态是 `FREE`），这里将会通知 RM 这个 slot 现在又可用了；
+>
+>3. 更新缓存信息。
+>
+>## 总结
+>
+>本篇文章主要把 TaskManager 的启动流程及资源管理做了相应的讲述，正如文章中所述，**TaskManager 主要有三大功能：slot 资源管理、task 的提交与运行以及 checkpoint 处理**，在下篇文章中将会着重在 Task 的提交与运行上，checkpoint 处理部分将会 checkpoint 的文章中一起介绍。
+
+## [Flink TaskManager 详解（一）](https://matt33.com/2020/03/15/flink-taskmanager-7/)
+
+>
+
+## [Flink JobManager 详解](https://matt33.com/2019/12/27/flink-jobmanager-6/)
+
+>
+
+------------------------
+
+
 
 ## [Flink Checkpoint超时问题常见排查思路](https://blog.csdn.net/cheyanming123/article/details/100565210)
 
@@ -1020,7 +1482,7 @@ https://zhuanlan.zhihu.com/p/90721680
 > - **如果reference不为空，则会取该对象的地址，加上后面的offset，从相对地址处取出8字节并得到 long。这对应了堆内存的场景。**
 > - **如果reference为空，则offset就是要操作的绝对地址，从该地址处取出数据。这对应了堆外内存的场景。**
 >
-> Unsafe 类不能直接由应用类加载器直接加载到，flink 通过反射获取。
+> Unsafe 类不能直接由应用类加载器直接加载到，**flink 通过反射获取**。
 >
 > org.apache.flink.core.memory.MemoryUtils#getUnsafe
 >
@@ -1100,7 +1562,7 @@ https://zhuanlan.zhihu.com/p/90721680
 >
 >- Flink中InternalTimerService的最终实现实际上是InternalTimerServiceImpl类，而InternalTimer的最终实现是TimerHeapInternalTimer类。
 >- InternalTimeServiceManager会用HashMap维护一个特定键类型K下所有InternalTimerService的名称与实例映射。如果名称已经存在，就会直接返回，不会重新创建。
->- 初始化InternalTimerServiceImpl时，会同时创建两个包含TimerHeapInternalTimer的优先队列（该优先队列是Flink自己实现的），分别用于维护事件时间和处理时间的Timer。
+>- 初始化InternalTimerServiceImpl时，会同时创建两个包含TimerHeapInternalTimer的优先队列（该优先队列是Flink自己实现的），**分别用于维护事件时间和处理时间的Timer**。
 >
 >TimerHeapInternalTimer的实现比较简单，主要就是4个字段和1个方法。为了少打点字，把注释也弄过来。
 >
@@ -1549,7 +2011,7 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 >
 >■ 合理设置超时时间
 >
->默认的超时时间是 10min，如果 state 规模大，则需要合理配置。最坏情况是分布式地创建速度大于单点（job master 端）的删除速度，导致整体存储集群可用空间压力较大。建议当检查点频繁因为超时而失败时，增大超时时间。
+>默认的超时时间是 10min，如果 state 规模大，则需要合理配置。**最坏情况是分布式地创建速度大于单点**（job master 端）的删除速度，导致整体存储集群可用空间压力较大。**建议当检查点频繁因为超时而失败时，增大超时时间。**
 >
 >**五、资源配置**
 >
@@ -1591,7 +2053,7 @@ https://cloud.tencent.com/developer/article/1398203
 >
 >## **doc**
 >
->- Parsing command line arguments and passing them around in your Flink application
+>- **Parsing command line arguments and passing them around in your Flink application**
 
 # sgg_flink 学习笔记
 
@@ -1599,7 +2061,7 @@ https://cloud.tencent.com/developer/article/1398203
 
 ![image-20200821133212243](./flink_img/image-20200821133212243.png)
 
-第二代数据处理系统，两套系统：1. 低延迟但可靠性也低的流处理系统   2. 高延迟但是可靠性高的批处理系统.
+第二代数据处理系统，两套系统：**1. 低延迟但可靠性也低的流处理系统   2. 高延迟但是可靠性高的批处理系统.**
 
 ![image-20200821135111269](./flink_img/image-20200821135111269.png)
 
@@ -1807,7 +2269,7 @@ public TriggerResult onEventTime(long time, TimeWindow window, TriggerContext ct
 
 ## P112 类型信息
 
-Flink有类型提取系统，可以分析函数的输入和输出类型来自动获取类型信息，继而得到相应的序列化器和反序列化器，但是如果使用了 Lamda函数或者泛型信息类型，必须显式指定类型信息才能启动应用或提高性能。
+Flink有**类型提取系统**，可以分析函数的输入和输出类型来自动获取类型信息，**继而得到相应的序列化器和反序列化器**，但是如果使用了 Lamda函数或者泛型信息类型，**必须显式指定类型信息才能启动应用或提高性能**。
 
 Flink 中一个名为类型提取器的组件会分析所有函数的泛型类型及返回类型，以获取相应的 TypeInformation对象，如果在一些类型提取器失灵的情况下，你需要为特定的数据类型生成 TypeInformation。
 
@@ -1925,7 +2387,7 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
 - FsStateBackend
 
-  - 本地状态跟MemoryStateBackend一样会存储到TaskManager 的 JVM 堆上, 
+  - 本地状态跟MemoryStateBackend一样会存储到TaskManager 的 JVM 堆上,
   - checkpoint数据持久化到文件系统（FileSystem）中.
   - 有着内存级别的快速访问和文件系统存储的安全性，能够更好的容错。
 
@@ -1945,7 +2407,7 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
 ## p190 确保有状态应用的可维护性
 
-唯一标识和最大并行度会被固化到保存点中，不可更改，如果这两个参数发生变化，则无法从之前的保存点中启动。
+**唯一标识和最大并行度会被固化到保存点中**，不可更改，如果这两个参数发生变化，则无法从之前的保存点中启动。
 
 ## P195 防止状态泄露
 
@@ -1967,7 +2429,7 @@ Flink 默认情况下不允许那些无法将保存点中的状态全部恢复�
 
 ## P210 应用的一致性保障
 
-Flink 的检查点和恢复机制结合可重置的数据源连接器能够保证应用不会丢失数据，但可能发出重复的数据。若想提供端到端的一致性保障，需要特殊的数据汇连接器实现。数据汇连接器需要实现两种技术：**幂等性写和事务性写**。
+Flink 的**检查点和恢复机制结合可重置的数据源连接器能够保证应用不会丢失数据**，但可能发出重复的数据。若想提供端到端的一致性保障，需要特殊的数据汇连接器实现。数据汇连接器需要实现两种技术：**幂等性写和事务性写**。
 
 Flink 提供了两个构件来实现**事务性**的数据汇连接器：一个通用性的 WAL（write ahead log，写前日志）数据汇和一个2PC（two-phase commit，两阶段提交）数据汇。
 
