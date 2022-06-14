@@ -8,6 +8,22 @@ https://cf.jd.com/pages/viewpage.action?pageId=644730231
 
 # 问题
 
+### ["Buffer pool is destroyed" issue found in Apache Flink flapMap Operator](https://stackoverflow.com/questions/55468495/buffer-pool-is-destroyed-issue-found-in-apache-flink-flapmap-operator)
+
+>> What is a Buffer pool?
+>
+>Buffer pool is a fixed size pool of memory segments instances for the network stack, which means that you put segments into it when you send data and fetch segments from it when you receive across the network.
+>
+>> Why is it destroyed?
+>
+>The buffer pool is destroyd because the network environment shuts down.
+>
+>> Why does NetworkEnvironment shut down?
+>
+>It may be a specific circumtances which I'm not very sure. I suggest you read more logs above this buffer pool exception.
+>
+>
+
 ### [Non Serializable object in Apache Flink](https://stackoverflow.com/questions/59713451/non-serializable-object-in-apache-flink)
 
 >Using `open` is usually the right place to load external lookup sources. The timeout is a bit odd, maybe there is a configuration around it.
@@ -143,8 +159,8 @@ https://gitlab.bigdata.letv.com/data-realtime/rdp.jobs.mob   中的 rdp.mob.ios.
 
 ### flink中元素的序列化
 
- * 流中的元素不需要专门实现 Serializable 接口，Flink有一套类型处理系统，可以专门**提取流中的元素类型**，获取序列化器和反序列化器。
- * 但是从主线程向算子中传变量时，该变量需要实现 Serializable 接口，flink 没有对这种变量的序列化和反序列化做自动的处理。
+ * **流中的元素不需要专门实现 Serializable 接口**，Flink有一套类型处理系统，可以专门**提取流中的元素类型**，获取序列化器和反序列化器。
+ * 但是从**主线程向算子中传变量时，该变量需要实现 Serializable 接口，flink 没有对这种变量的序列化和反序列化做自动的处理。**
 
 ### [为什么Flink中的函数需要序列化?](https://www.runexception.com/q/12332)
 
@@ -450,19 +466,19 @@ Take a simple `Source -> Sink` job as an example. If you see a warning for `Sour
 
 **Sampling Back Pressure**
 
-Back pressure monitoring works by repeatedly taking back pressure samples of your running tasks. The JobManager triggers repeated calls to `Task.isBackPressured()` for the tasks of your job.
+Back pressure monitoring works by repeatedly taking back pressure samples of your running tasks. **The JobManager triggers repeated calls to `Task.isBackPressured()` for the tasks of your job.**
 
 ![img](flink_note.assets/back_pressure_sampling.png)
 
 Internally, back pressure is judged based on the availability of output buffers. If there is no available buffer (at least one) for output, then it indicates that there is back pressure for the task.
 
-By default, the job manager triggers 100 samples every 50ms for each task in order to determine back pressure. The ratio you see in the web interface tells you how many of these samples were indicating back pressure, e.g. `0.01` indicates that only 1 in 100 was back pressured.
+By default, **the job manager triggers 100 samples every 50ms for each task in order to determine back pressure.** The ratio you see in the web interface tells you how many of these samples were indicating back pressure, e.g. `0.01` indicates that only 1 in 100 was back pressured.
 
 - **OK**: 0 <= Ratio <= 0.10
 - **LOW**: 0.10 < Ratio <= 0.5
 - **HIGH**: 0.5 < Ratio <= 1
 
-In order to not overload the task managers with back pressure samples, the web interface refreshes samples only after 60 seconds.
+In order to not overload the task managers with back pressure samples, **the web interface refreshes samples only after 60 seconds.**
 
 **Configuration**
 
@@ -496,11 +512,11 @@ You can configure the number of samples for the job manager with the following c
 >
 >Flink 运行时包含两类进程：
 >
->- **JobManagers** （也称为 *masters*）协调分布式计算。它们负责调度任务、协调 checkpoints、协调故障恢复等。
+>- **JobManagers** （也称为 *masters*）**协调分布式计算。**它们负责调度任务、协调 checkpoints、协调故障恢复等。
 >
->  每个 Job 至少会有一个 JobManager。高可用部署下会有多个 JobManagers，其中一个作为 *leader*，其余处于 *standby* 状态。
+>  每个 Job 至少会有一个 JobManager。**高可用部署下会有多个 JobManagers，其中一个作为 *leader*，其余处于 *standby* 状态。**
 >
->- **TaskManagers**（也称为 *workers*）执行 dataflow 中的 *tasks*（准确来说是 subtasks ），并且缓存和交换数据 *streams*。
+>- **TaskManagers**（也称为 *workers*）执行 **dataflow 中的 *tasks*（准确来说是 subtasks ），并且缓存和交换数据 *streams*。**
 >
 >  每个 Job 至少会有一个 TaskManager。
 >
@@ -516,22 +532,22 @@ You can configure the number of samples for the job manager with the following c
 >
 >每个 worker（TaskManager）都是一个 *JVM 进程*，并且可以在不同的线程中执行一个或多个 subtasks。为了控制 worker 接收 task 的数量，worker 拥有所谓的 **task slots** （至少一个）。
 >
->每个 *task slots* 代表 TaskManager 的一份固定资源子集。例如，具有三个 slots 的 TaskManager 会将其管理的内存资源分成三等份给每个 slot。 划分资源意味着 subtask 之间不会竞争资源，但是也意味着它们只拥有固定的资源。注意这里并没有 CPU 隔离，当前 slots 之间只是划分任务的内存资源。
+>每个 *task slots* 代表 TaskManager 的一份固定资源子集。例如，具有三个 slots 的 TaskManager 会将其管理的内存资源分成三等份给每个 slot。 划分资源意味着 subtask 之间不会竞争资源，但是也意味着它们只拥有固定的资源。**注意这里并没有 CPU 隔离，当前 slots 之间只是划分任务的内存资源。**
 >
->通过调整 slot 的数量，用户可以决定 subtasks 的隔离方式。每个 TaskManager 有一个 slot 意味着每组 task 在一个单独的 JVM 中运行（例如，在一个单独的容器中启动）。拥有多个 slots 意味着多个 subtasks 共享同一个 JVM。 Tasks 在同一个 JVM 中共享 TCP 连接（通过多路复用技术）和心跳信息（heartbeat messages）。它们还可能共享数据集和数据结构，从而降低每个 task 的开销。
+>通过调整 slot 的数量，用户可以决定 subtasks 的隔离方式。每个 TaskManager 有一个 slot 意味着每组 task 在一个单独的 JVM 中运行（例如，在一个单独的容器中启动）。**拥有多个 slots 意味着多个 subtasks 共享同一个 JVM。 Tasks 在同一个 JVM 中共享 TCP 连接（通过多路复用技术）和心跳信息（heartbeat messages）。它们还可能共享数据集和数据结构，从而降低每个 task 的开销。**
 >
 >![A TaskManager with Task Slots and Tasks](flink_note.assets/tasks_slots.svg)
 >
->默认情况下，Flink 允许 subtasks 共享 slots，即使它们是不同 tasks 的 subtasks，只要它们来自同一个 job。因此，一个 slot 可能会负责这个 job 的整个管道（pipeline）。允许 *slot sharing* 有两个好处：
+>默认情况下，**Flink 允许 subtasks 共享 slots，即使它们是不同 tasks 的 subtasks，只要它们来自同一个 job。**因此，一个 slot 可能会负责这个 job 的整个管道（pipeline）。允许 *slot sharing* 有两个好处：
 >
->- Flink 集群需要与 job 中使用的最高并行度一样多的 slots。这样不需要计算作业总共包含多少个 tasks（具有不同并行度）。
->- 更好的资源利用率。在没有 slot sharing 的情况下，简单的 subtasks（*source/map()*）将会占用和复杂的 subtasks （*window*）一样多的资源。通过 slot sharing，将示例中的并行度从 2 增加到 6 可以充分利用 slot 的资源，同时确保繁重的 subtask 在 TaskManagers 之间公平地获取资源。
+>- **Flink 集群需要与 job 中使用的最高并行度一样多的 slots。这样不需要计算作业总共包含多少个 tasks（具有不同并行度）。**
+>- 更好的资源利用率。**在没有 slot sharing 的情况下，简单的 subtasks（*source/map()*）将会占用和复杂的 subtasks （*window*）一样多的资源。**通过 slot sharing，将示例中的并行度从 2 增加到 6 可以充分利用 slot 的资源，同时确保繁重的 subtask 在 TaskManagers 之间公平地获取资源。
 >
 >![TaskManagers with shared Task Slots](flink_note.assets/slot_sharing.svg)
 >
 >APIs 还包含了 *[resource group](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/dev/stream/operators/#task-chaining-and-resource-groups)* 机制，它可以用来防止不必要的 slot sharing。
 >
->根据经验，合理的 slots 数量应该和 CPU 核数相同。在使用超线程（hyper-threading）时，每个 slot 将会占用 2 个或更多的硬件线程上下文（hardware thread contexts）。
+>根据经验，**合理的 slots 数量应该和 CPU 核数相同**。在使用超线程（hyper-threading）时，每个 slot 将会占用 2 个或更多的硬件线程上下文（hardware thread contexts）。
 >
 >[ Back to top](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/concepts/runtime.html#top)
 >
@@ -545,9 +561,9 @@ You can configure the number of samples for the job manager with the following c
 >
 >## Savepoints
 >
->用 Data Stream API 编写的程序可以从 **savepoint** 继续执行。Savepoints 允许在不丢失任何状态的情况下升级程序和 Flink 集群。
+>用 Data Stream API 编写的程序可以从 **savepoint** 继续执行。**Savepoints 允许在不丢失任何状态的情况下升级程序和 Flink 集群。**
 >
->[Savepoints](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/ops/state/savepoints.html) 是**手动触发的 checkpoints**，它依靠常规的 checkpoint 机制获取程序的快照并将其写入 state backend。在执行期间，程序会定期在 worker 节点上创建快照并生成 checkpoints。对于恢复，Flink 仅需要最后完成的 checkpoint，而一旦完成了新的 checkpoint，旧的就可以被丢弃。
+>[Savepoints](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/ops/state/savepoints.html) 是**手动触发的 checkpoints**，**它依靠常规的 checkpoint 机制获取程序的快照并将其写入 state backend。在执行期间，程序会定期在 worker 节点上创建快照并生成 checkpoints。对于恢复，Flink 仅需要最后完成的 checkpoint，而一旦完成了新的 checkpoint，旧的就可以被丢弃。**
 >
 >Savepoints 类似于这些定期的 checkpoints，除了它们是**由用户触发**并且在新的 checkpoint 完成时**不会自动过期**。你可以通过[命令行](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/ops/cli.html#savepoints) 或在取消一个 job 时通过 [REST API](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/monitoring/rest_api.html#cancel-job-with-savepoint) 来创建 Savepoints。
 
@@ -555,7 +571,7 @@ You can configure the number of samples for the job manager with the following c
 
 >## Buffer debloating [#](https://nightlies.apache.org/flink/flink-docs-release-1.14/docs/ops/state/checkpointing_under_backpressure/#buffer-debloating)
 >
->Flink 1.14 introduced a new tool to automatically control the amount of buffered in-flight data between Flink operators/subtasks. The buffer debloating mechanism can be enabled by setting the property `taskmanager.network.memory.buffer-debloat.enabled` to `true`.
+>**Flink 1.14 introduced a new tool to automatically control the amount of buffered in-flight data between Flink operators/subtasks.** The buffer debloating mechanism can be enabled by setting the property `taskmanager.network.memory.buffer-debloat.enabled` to `true`.
 >
 >This feature works with both aligned and unaligned checkpoints and can improve checkpointing times in both cases, but the effect of the debloating is most visible with aligned checkpoints. When using buffer debloating with unaligned checkpoints, the added benefit will be smaller checkpoint sizes and quicker recovery times (there will be less in-flight data to persist and recover).
 >
@@ -570,6 +586,64 @@ You can configure the number of samples for the job manager with the following c
 >
 
 # 学习
+
+## flink keyBy 的原理
+
+```
+KeyGroupRangeAssignment
+```
+
+```java
+org.apache.flink.streaming.runtime.partitioner.KeyGroupStreamPartitioner#selectChannel
+    @Override
+    public int selectChannel(SerializationDelegate<StreamRecord<T>> record) {
+        K key;
+        try {
+            key = keySelector.getKey(record.getInstance().getValue());
+        } catch (Exception e) {
+            throw new RuntimeException(
+                    "Could not extract key from " + record.getInstance().getValue(), e);
+        }
+        return KeyGroupRangeAssignment.assignKeyToParallelOperator(
+                key, maxParallelism, numberOfChannels);
+    }
+
+
+    /**
+     * Assigns the given key to a parallel operator index.
+     *
+     * @param key the key to assign
+     * @param maxParallelism the maximum supported parallelism, aka the number of key-groups.
+     * @param parallelism the current parallelism of the operator
+     * @return the index of the parallel operator to which the given key should be routed.
+     */
+    public static int assignKeyToParallelOperator(Object key, int maxParallelism, int parallelism) {
+        Preconditions.checkNotNull(key, "Assigned key must not be null!");
+        return computeOperatorIndexForKeyGroup(
+                maxParallelism, parallelism, assignToKeyGroup(key, maxParallelism));
+    }
+
+
+    org.apache.flink.runtime.state.KeyGroupRangeAssignment#computeKeyGroupForKeyHash
+    /**
+     * Assigns the given key to a key-group index.
+     *
+     * @param keyHash the hash of the key to assign
+     * @param maxParallelism the maximum supported parallelism, aka the number of key-groups.
+     * @return the key-group to which the given key is assigned
+     */
+    public static int computeKeyGroupForKeyHash(int keyHash, int maxParallelism) {
+        return MathUtils.murmurHash(keyHash) % maxParallelism;
+    }
+
+    public static int computeOperatorIndexForKeyGroup(
+            int maxParallelism, int parallelism, int keyGroupId) {
+        return keyGroupId * parallelism / maxParallelism;
+    }
+  
+```
+
+
 
 ## flink 源码分析系列文章
 
@@ -1041,8 +1115,97 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 
 ## [Flink 类型和序列化机制简介](https://cloud.tencent.com/developer/article/1240444)
 
+>## 声明类型信息的常见手段
 >
+>通过 TypeInformation.of() 方法，可以简单地创建类型信息对象。
 >
+>**1. 对于非泛型的类，直接传入 Class 对象即可**
+>
+>![image-20220612000540080](flink_note.assets/image-20220612000540080.png)
+>
+>图 6：class 对象作为参数
+>
+>**2. 对于泛型类，需要借助 TypeHint 来保存泛型类型信息**
+>
+>TypeHint 的原理是创建匿名子类，运行时 TypeExtractor 可以通过 getGenericSuperclass(). getActualTypeArguments() 方法获取保存的实际类型。
+>
+>![img](flink_note.assets/1620-20220612000443182.png)
+>
+>图 7：TypeHint 作为参数，保存泛型信息
+>
+>**3. 预定义的快捷方式**
+>
+>例如 BasicTypeInfo，这个类定义了一系列常用类型的快捷方式，对于 String、Boolean、Byte、Short、Integer、Long、Float、Double、Char 等基本类型的类型声明，可以直接使用。
+>
+>![img](flink_note.assets/1620.png)图 8：BasicTypeInfo 快捷方式
+>
+>例如下面是对 Row 类型各字段的类型声明，使用方法非常简明，不再需要 new XxxTypeInfo<>(很多很多参数)
+>
+>![img](flink_note.assets/1620-20220612000443185.png)
+>
+>图 9：使用 BasicTypeInfo 快捷方式来声明一行（Row）每个字段的类型信息
+>
+>当然，如果觉得 BasicTypeInfo 还是太长，Flink 还提供了完全等价的 Types 类（org.apache.flink.api.common.typeinfo.Types）：
+>
+>![img](flink_note.assets/1620-20220612000443279.png)图 10：Types 类
+>
+>特别需要注意的是，flink-table 模块也有一个 Types 类（org.apache.flink.table.api.Types），用于 table 模块内部的类型定义信息，用法稍有不同。使用 IDE 的自动 import 时一定要小心：
+>
+>![img](flink_note.assets/1620-20220612000443209.png)
+>
+>图 11：flink-table 模块的 Types 类
+>
+>**4. 自定义 TypeInfo 和 TypeInfoFactory**
+>
+>通过自定义 TypeInfo 为任意类提供 Flink 原生内存管理（而非 Kryo），可令存储更紧凑，运行时也更高效。
+>
+>开发者在自定义类上使用 @TypeInfo 注解，随后创建相应的 TypeInfoFactory 并覆盖 createTypeInfo 方法。
+>
+>注意需要继承 TypeInformation 类，为每个字段定义类型，并覆盖元数据方法，例如是否是基本类型（isBasicType）、是否是 Tuple（isTupleType）、元数（对于一维的 Row 类型，等于字段的个数）等等，从而为 TypeExtractor 提供决策依据。
+>
+>![img](flink_note.assets/1620-20220612001958614.png)
+>
+>如果不能满足，那么可以继承 TypeSerializer 及其子类以实现自己的序列化器。
+>
+>## Kryo 序列化
+>
+>对于 Flink 无法序列化的类型（例如用户自定义类型，没有 registerType，也没有自定义 TypeInfo 和 TypeInfoFactory），默认会交给 Kryo 处理。
+>
+>如果 Kryo 仍然无法处理（例如 Guava、Thrift、Protobuf 等第三方库的一些类），有以下两种解决方案：
+>
+>1. 可以强制使用 Avro 来替代 Kryo：
+>
+>```js
+>env.getConfig().enableForceAvro();   // env 代表 ExecutionEnvironment 对象, 下同
+>```
+>
+>2. 为 Kryo 增加自定义的 Serializer 以增强 Kryo 的功能：
+>
+>```js
+> env.getConfig().addDefaultKryoSerializer(Class<?> type, Class<? extends Serializer<?>> serializerClass
+>```
+>
+>![img](flink_note.assets/1620-20220612002112737.png)图 14：为 Kryo 增加自定义的 Serializer
+>
+>以及 
+>
+>```js
+>env.getConfig().registerTypeWithKryoSerializer(Class<?> type, T serializer)
+>```
+>
+>![img](flink_note.assets/1620-20220612002113542.png)
+>
+>图 15：为 Kryo 增加自定义的 Serializer
+>
+>如果希望完全禁用 Kryo（100% 使用 Flink 的序列化机制），则可以使用以下设置，但注意一切无法处理的类都将导致异常：
+>
+>```js
+>env.getConfig().disableGenericTypes();
+>```
+>
+>## 类型机制与内存管理
+>
+>![img](https://ask.qcloudimg.com/draft/1207538/zsof9qw1mg.png?imageView2/2/w/1620)图 16：类型信息到内存块
 
 ## [FLINK 中AggregateFunction里面的四个方法中的merge方法是做什么用的？](https://www.zhihu.com/question/346639699)
 
@@ -1063,7 +1226,7 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 
 >![image-20220413144120788](flink_note.assets/image-20220413144120788.png)
 >
->在普通的翻滚窗口和滑动窗口中，窗口的范围是按时间区间固定的，虽然范围有可能重合，但是处理起来是各自独立的，并不会相互影响。但是会话窗口则不同，其范围是根据事件之间的时间差是否超过gap来确定的（超过gap就形成一个新窗口），也就是说并非固定。所以，我们需要在每个事件进入会话窗口算子时就为它分配一个初始窗口，起点是它本身所携带的时间戳（这里按event time处理），终点则是时间戳加上gap的偏移量。这样的话，如果两个事件所在的初始窗口没有相交，说明它们属于不同的会话；如果相交，则说明它们属于同一个会话，并且要把这两个初始窗口合并在一起，作为新的会话窗口。多个事件则依次类推，最终形成上面图示的情况。
+>在普通的翻滚窗口和滑动窗口中，窗口的范围是按时间区间固定的，虽然范围有可能重合，但是处理起来是各自独立的，并不会相互影响。但是会话窗口则不同，**其范围是根据事件之间的时间差是否超过gap来确定的**（超过gap就形成一个新窗口），也就是说并非固定。所以，**我们需要在每个事件进入会话窗口算子时就为它分配一个初始窗口，起点是它本身所携带的时间戳（这里按event time处理），终点则是时间戳加上gap的偏移量。这样的话，如果两个事件所在的初始窗口没有相交，说明它们属于不同的会话；如果相交，则说明它们属于同一个会话，并且要把这两个初始窗口合并在一起，作为新的会话窗口。多个事件则依次类推，最终形成上面图示的情况。**
 
 
 
@@ -1118,7 +1281,7 @@ https://zhuanlan.zhihu.com/p/90721680
 
 >`keyBy`算子将`DataStream`转换成一个`KeyedStream`。`KeyedStream`是一种特殊的`DataStream`，事实上，`KeyedStream`继承了`DataStream`，`DataStream`的各元素随机分布在各Task Slot中，`KeyedStream`的各元素按照Key分组，分配到各Task Slot中。我们需要向`keyBy`算子传递一个参数，以告知Flink以什么字段作为Key进行分组。
 >
->其实，这些aggregation操作里已经封装了状态数据，比如，`sum`算子内部记录了当前的和，`max`算子内部记录了当前的最大值。由于内部封装了状态数据，而且状态数据并不会被清理，因此一定要避免在一个无限数据流上使用aggregation。
+>**其实，这些aggregation操作里已经封装了状态数据，比如，`sum`算子内部记录了当前的和，`max`算子内部记录了当前的最大值。由于内部封装了状态数据，而且状态数据并不会被清理，因此一定要避免在一个无限数据流上使用aggregation。**
 >
 >注意，**对于一个`KeyedStream`,一次只能使用一个aggregation操作，无法链式使用多个。**
 
@@ -1294,14 +1457,14 @@ https://zhuanlan.zhihu.com/p/90721680
 ># 重启策略
 >
 >1. Flink何时才会重启？
->     一个拥有检查点的应用如果出现问题，他会经过一些列步骤来进行重启。
+>     **一个拥有检查点的应用如果出现问题，他会经过一些列步骤来进行重启。**
 >2. 重启过程中可能会出现的问题?
 >     **有些时候，应用可能会被相同的故障不断“杀死”**
 >     `举例：`
 >       当我处理数据的时候程序出现了Bug，导致处理算子出现异常，此时程序就会陷入一个循环中：
 >       启动任务、恢复状态、继续处理。
 >     在继续处理的时候，由于这个Bug没有被修复，然后
->       启动任务、恢复状态、继续处理。
+>       **启动任务、恢复状态、继续处理。**
 >     类似于这样周而复始
 >
 ># 配置重启策略
@@ -1332,15 +1495,15 @@ https://zhuanlan.zhihu.com/p/90721680
 >
 >如何通过检查点重新提交? 
 >
->  保存点和检查点内部的生成算法是一致的，工作方式也一致，但保存点相比较检查点有什么不同呢？
+>  **保存点和检查点内部的生成算法是一致的，工作方式也一致**，但保存点相比较检查点有什么不同呢？
 >
 >  保存点与检查点有什么不同？
 >
 >1. 生成逻辑不同
->     a) 检查点：通过代码进行生成
->     b) 保存点：由用户通过flink命令行或者web控制台进行手动触发
+>     **a) 检查点：通过代码进行生成**
+>     **b) 保存点：由用户通过flink命令行或者web控制台进行手动触发**
 >2. 存储的信息不同
->     保存点相比较检查点来说存储了更为详细的一些元数据信息。
+>     **保存点相比较检查点来说存储了更为详细的一些元数据信息。**
 >
 >检查点在什么情况下触发？
 > 例如我在另一篇博文中所描述的“[重启策略](https://blog.csdn.net/qq_33982605/article/details/106207065)”中的例子，检查点在作业意外失败后会自动重启，并能够从保存的检查点路径中自动恢复状态，且不影响作业逻辑的准确性。
@@ -1362,13 +1525,13 @@ https://zhuanlan.zhihu.com/p/90721680
 >
 >* **保存点在什么情况下触发？**
 >
-> 保存点侧重的是维护，即flink作业需要在人工干预的情况下进行重启或升级，维护完毕后再从保存点恢复到升级后的状态。
+> **保存点侧重的是维护，即flink作业需要在人工干预的情况下进行重启或升级，维护完毕后再从保存点恢复到升级后的状态。**
 
 ## [探究 Flink on YARN 模式下 TaskManager 的内存分配](https://blog.csdn.net/magic_kid_2010/article/details/108075383?utm_medium=distribute.pc_relevant.none-task-blog-OPENSEARCH-3.control&depth_1-utm_source=distribute.pc_relevant.none-task-blog-OPENSEARCH-3.control)（重要）
 
 >![img](https://imgconvert.csdnimg.cn/aHR0cHM6Ly91cGxvYWQtaW1hZ2VzLmppYW5zaHUuaW8vdXBsb2FkX2ltYWdlcy8xOTUyMzAtMWRlYzliMzAwYjFmOGUzZi5wbmc?x-oss-process=image/format,png)
 >
->- 网络缓存（Network Buffer）：用于网络传输及与网络相关的动作（shuffle、广播等）的内存块，由MemorySegment组成。从Flink 1.5版本之后，网络缓存固定分配在堆外，这样可以充分利用零拷贝等技术。与它相关的三个参数及我们的设定值如下：
+>- **Network Buffer（网络缓存）**：用于**网络传输及与网络相关的动作（shuffle、广播等）的内存块，由MemorySegment组成。从Flink 1.5版本之后，网络缓存固定分配在堆外，这样可以充分利用零拷贝等技术。**与它相关的三个参数及我们的设定值如下：
 >
 >```shel
 ># 网络缓存占TM内存的默认比例，默认0.1
@@ -1378,7 +1541,7 @@ https://zhuanlan.zhihu.com/p/90721680
 >taskmanager.network.memory.max: 1gb
 >```
 >
->- 托管内存（Flink Managed Memory）：**用于所有Flink内部算子逻辑的内存分配，以及中间数据的存储，同样由MemorySegment组成，并通过Flink的MemoryManager组件管理。**它默认在堆内分配，如果开启堆外内存分配的开关，也可以在堆内、堆外同时分配。与它相关的两个参数如下：
+>- **Flink Managed Memory**（托管内存）：**用于所有Flink内部算子逻辑的内存分配，以及中间数据的存储，同样由MemorySegment组成，并通过Flink的MemoryManager组件管理。**它默认在堆内分配，如果开启堆外内存分配的开关，也可以在堆内、堆外同时分配。与它相关的两个参数如下：
 >
 >```
 ># 堆内托管内存占TM堆内内存的比例，默认0.7
@@ -1387,7 +1550,7 @@ https://zhuanlan.zhihu.com/p/90721680
 >taskmanager.memory.off-heap: false
 >```
 >
->- 空闲内存（Free）：虽然名为空闲，**但实际上是存储用户代码和数据结构的**，固定在堆内，可以理解为堆内内存除去托管内存后剩下的那部分。
+>- **Free Memory**：虽然名为自由，**但实际上是存储用户代码和数据结构的**，固定在堆内，可以理解为堆内内存除去托管内存后剩下的那部分。
 >
 
 ## h3 [flink的 memorysegment](https://blog.csdn.net/zhoucs86/article/details/91049219)（全面、重要）
@@ -1401,15 +1564,15 @@ https://zhuanlan.zhihu.com/p/90721680
 > ![image-20210302164011180](./flink_note.assets/image-20210302164011180.png)
 >
 > - **Network Buffers:** 一定数量的32KB大小的 buffer，**主要用于数据的网络传输。**在 TaskManager 启动的时候就会分配。默认数量是 2048 个，可以通过 `taskmanager.network.numberOfBuffers` 来配置。（阅读[这篇文章](http://wuchong.me/blog/2016/04/26/flink-internals-how-to-handle-backpressure/#网络传输中的内存管理)了解更多Network Buffer的管理）
-> - **Memory Manager Pool:** 这是一个由 `MemoryManager` 管理的，由众多`MemorySegment`组成的超大集合。**Flink 中的算法（如 sort/shuffle/join）会向这个内存池申请 MemorySegment，将序列化后的数据存于其中，使用完后释放回内存池。**默认情况下，池子占了堆内存的 70% 的大小。
-> - **Remaining (Free) Heap:** 这部分的内存是留给用户代码以及 TaskManager 的数据结构使用的。因为这些数据结构一般都很小，所以基本上这些内存都是给用户代码使用的。从GC的角度来看，可以把这里看成的新生代，也就是说这里主要都是由用户代码生成的短期对象。
+> - **FlinkManagementMemory**   （Memory Manager Pool）: 这是一个由 `MemoryManager` 管理的，由众多`MemorySegment`组成的超大集合。**Flink 中的算法（如 sort/shuffle/join）会向这个内存池申请 MemorySegment，将序列化后的数据存于其中，使用完后释放回内存池。**默认情况下，池子占了堆内存的 70% 的大小。
+> - **Remaining (Free) Heap:** 这部分的内存是**留给用户代码以及 TaskManager 的数据结构使用的**。因为这些数据结构一般都很小，所以基本上这些内存都是给用户代码使用的。从GC的角度来看，可以把这里看成的新生代，也就是说**这里主要都是由用户代码生成的短期对象。**
 >
-> 从上面我们能够得出 Flink 积极的内存管理以及直接操作二进制数据有以下几点好处：
+> 从上面我们能够得出 Flink **积极的内存管理以及直接操作二进制数据**有以下几点好处：
 >
 > 1. **减少GC压力。**显而易见，因为所有常驻型数据都以二进制的形式存在 Flink 的`MemoryManager`中，**这些`MemorySegment`一直呆在老年代而不会被GC回收。其他的数据对象基本上是由用户代码生成的短生命周期对象，这部分对象可以被 Minor GC 快速回收。只要用户不去创建大量类似缓存的常驻型对象，那么老年代的大小是不会变的，Major GC也就永远不会发生。从而有效地降低了垃圾回收的压力。另外，这里的内存块还可以是堆外内存，这可以使得 JVM 内存更小，从而加速垃圾回收。**
-> 2. **避免了OOM。**所有的运行时数据结构和算法**只能通过内存池申请内存，保证了其使用的内存大小是固定的，不会因为运行时数据结构和算法而发生OOM。**在内存吃紧的情况下，算法（sort/join等）会高效地将一大批内存块写到磁盘，之后再读回来。因此，`OutOfMemoryErrors`可以有效地被避免。
-> 3. **节省内存空间。**Java 对象在存储上有很多额外的消耗（如上一节所谈）。如果只存储实际数据的二进制内容，就可以避免这部分消耗。
-> 4. **高效的二进制操作 & 缓存友好的计算。**二进制数据以定义好的格式存储，可以高效地比较与操作。另外，该二进制形式可以把相关的值，以及hash值，键值和指针等相邻地放进内存中。这使得数据结构可以对高速缓存更友好，可以从 L1/L2/L3 缓存获得性能的提升（下文会详细解释）。
+> 2. **避免了OOM。**所有的运行时数据结构和算法**只能通过内存池申请内存，保证了其使用的内存大小是固定的，不会因为运行时数据结构和算法而发生OOM。**在内存吃紧的情况下，**算法（sort/join等）会高效地将一大批内存块写到磁盘，之后再读回来。因此，`OutOfMemoryErrors`可以有效地被避免。**
+> 3. **节省内存空间。****Java 对象在存储上有很多额外的消耗（如上一节所谈）。如果只存储实际数据的二进制内容，就可以避免这部分消耗。**
+> 4. **高效的二进制操作 & 缓存友好的计算。****二进制数据以定义好的格式存储，可以高效地比较与操作。另外，该**二进制形式可以把相关的值，以及hash值，键值和指针等相邻地放进内存中**。这使得数据结构可以对高速缓存更友好，可以从 L1/L2/L3 缓存获得性能的提升**（下文会详细解释）。
 >
 > ## 为 Flink 量身定制的序列化框架
 >
@@ -1427,19 +1590,19 @@ https://zhuanlan.zhihu.com/p/90721680
 >
 > Flink 提供了如 group、sort、join 等操作，这些操作都需要访问海量数据。这里，我们以sort为例，这是一个在 Flink 中使用非常频繁的操作。
 >
-> 首先，Flink 会从 MemoryManager 中申请一批 MemorySegment，我们把这批 MemorySegment 称作 sort buffer，用来存放排序的数据。
+> 首先，**Flink 会从 MemoryManager 中申请一批 MemorySegment，我们把这批 MemorySegment 称作 sort buffer，用来存放排序的数据。**
 >
 > ![image-20210302165909920](./flink_note.assets/image-20210302165909920.png)
 >
-> 我们会把 sort buffer 分成两块区域。一个区域是用来存放所有对象完整的二进制数据。另一个区域用来存放指向完整二进制数据的指针以及定长的序列化后的key（key+pointer）。如果需要序列化的key是个变长类型，如String，则会取其前缀序列化。如上图所示，当一个对象要加到 sort buffer 中时，它的二进制数据会被加到第一个区域，指针（可能还有key）会被加到第二个区域。
+> 我们会**把 sort buffer 分成两块区域。一个区域是用来存放所有对象完整的二进制数据。另一个区域用来存放指向完整二进制数据的指针以及定长的序列化后的key（key+pointer）**。**如果需要序列化的key是个变长类型，如String，则会取其前缀序列化。如上图所示，当一个对象要加到 sort buffer 中时，它的二进制数据会被加到第一个区域，指针（可能还有key）会被加到第二个区域。**   **（注：和 spark 的tungsten 缓存敏感性优化非常类似）**
 >
-> 将实际的数据和指针加定长key分开存放有两个目的。第一，交换定长块（key+pointer）更高效，不用交换真实的数据也不用移动其他key和pointer。第二，这样做是缓存友好的，因为key都是连续存储在内存中的，可以大大减少 cache miss（后面会详细解释）。
+> 将实际的数据和指针加定长key分开存放有两个目的。**第一，交换定长块（key+pointer）更高效，不用交换真实的数据也不用移动其他key和pointer。第二，这样做是缓存友好的，因为key都是连续存储在内存中的，可以大大减少 cache miss**（后面会详细解释）。
 >
-> 排序的关键是比大小和交换。Flink 中，会先用 key 比大小，这样就可以直接用二进制的key比较而不需要反序列化出整个对象。因为key是定长的，所以如果key相同（或者没有提供二进制key），那就必须将真实的二进制数据反序列化出来，然后再做比较。之后，只需要交换key+pointer就可以达到排序的效果，真实的数据不用移动。
+> 排序的关键是比大小和交换。Flink 中，**会先用 key 比大小，这样就可以直接用二进制的key比较而不需要反序列化出整个对象。因为key是定长的，所以如果key相同（或者没有提供二进制key），那就必须将真实的二进制数据反序列化出来，然后再做比较。之后，只需要交换key+pointer就可以达到排序的效果，真实的数据不用移动。**
 >
 > ![image-20210302170542974](./flink_note.assets/image-20210302170542974.png)
 >
-> 最后，访问排序后的数据，可以沿着排好序的key+pointer区域顺序访问，通过pointer找到对应的真实数据，并写到内存或外部（更多细节可以看这篇文章 [Joins in Flink](http://flink.apache.org/news/2015/03/13/peeking-into-Apache-Flinks-Engine-Room.html)）。
+> 最后，访问排序后的数据，**可以沿着排好序的key+pointer区域顺序访问，通过pointer找到对应的真实数据，并写到内存或外部**（更多细节可以看这篇文章 [Joins in Flink](http://flink.apache.org/news/2015/03/13/peeking-into-Apache-Flinks-Engine-Room.html)）。
 >
 > ## 缓存友好的数据结构和算法
 >
@@ -1453,13 +1616,13 @@ https://zhuanlan.zhihu.com/p/90721680
 >
 > 1. **启动超大内存（上百GB）的JVM需要很长时间，GC停留时间也会很长（分钟级）**。使**用堆外内存的话，可以极大地减小堆内存（只需要分配Remaining Heap那一块），使得 TaskManager 扩展到上百GB内存不是问题。**
 > 2. **高效的 IO 操作。**堆外内存在写磁盘或网络传输时是 zero-copy，而堆内存的话，至少需要 copy 一次。
-> 3. **堆外内存是进程间共享的。**也就是说，即使JVM进程崩溃也不会丢失数据。这可以用来做故障恢复（Flink暂时没有利用起这个，不过未来很可能会去做）。
+> 3. **堆外内存是进程间共享的。**也就是说，**即使JVM进程崩溃也不会丢失数据。这可以用来做故障恢复（Flink暂时没有利用起这个，不过未来很可能会去做）。**
 >
 > 但是强大的东西总是会有其负面的一面，不然为何大家不都用堆外内存呢。
 >
-> 1. 堆内存的使用、监控、调试都要简单很多。堆外内存意味着更复杂更麻烦。
-> 2. Flink 有时需要分配短生命周期的 `MemorySegment`，这个申请在堆上会更廉价。
-> 3. 有些操作在堆内存上会快一点点。
+> 1. **堆内存的使用、监控、调试都要简单很多。堆外内存意味着更复杂更麻烦。**
+> 2. **Flink 有时需要分配短生命周期的 `MemorySegment`，这个申请在堆上会更廉价。**
+> 3. **有些操作在堆内存上会快一点点。**
 >
 > Flink用通过`ByteBuffer.allocateDirect(numBytes)`来申请堆外内存，用 `sun.misc.Unsafe` 来操作堆外内存。
 >
@@ -1469,7 +1632,7 @@ https://zhuanlan.zhihu.com/p/90721680
 >
 > **方案1：只能有一种 MemorySegment 实现被加载**
 >
-> 代码中所有的短生命周期和长生命周期的MemorySegment都实例化其中一个子类，另一个子类根本没有实例化过（使用工厂模式来控制）。那么运行一段时间后，JIT 会意识到所有调用的方法都是确定的，然后会做优化。
+> 代码中所有的**短生命周期和长生命周期的MemorySegment都实例化其中一个子类**，另一个子类根本没有实例化过（使用工厂模式来控制）。那么运行一段时间后，JIT 会意识到所有调用的方法都是确定的，然后会做优化。
 >
 > **方案2：提供一种实现能同时处理堆内存和堆外内存**
 >
@@ -1695,7 +1858,7 @@ https://zhuanlan.zhihu.com/p/90721680
 >  }
 >```
 >
->**（重要）所以，时间时间中，触发timer的方式是当数据流中收到 Watermark后，每个时间服务都会检查 计时器队列，将timestamp小于 Watermark 的计时器都触发**
+>**（重要）所以，事件时间中，触发timer的方式是当数据流中收到 Watermark后，每个时间服务都会检查 计时器队列，将timestamp小于 Watermark 的计时器都触发**
 >
 >至此，我们算是基本打通了 Flink Timer 机制的实现细节，well done
 
@@ -1886,7 +2049,7 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 
 ## [Flink系列之Metrics, 指标监控](https://zhuanlan.zhihu.com/p/50686853) 写得很好，能明白基本原理
 
->Flink Metrics指任务在flink集群中运行过程中的各项指标，包括机器系统指标：Hostname，CPU，Memory，Thread，GC，NetWork，IO 和 任务运行组件指标：JobManager，TaskManager，Job, Task，Operater相关指标。Flink提供metrics的目的有两点：第一，实时采集metrics的数据供flink UI进行数据展示，用户可以在页面上看到自己提交任务的状态，延迟等信息。第二，对外提供metrics收集接口，用户可以将整个fllink集群的metrics通过MetricsReport上报至第三方系统进行存储，展示和监控。第二种对大型的互联网公司很有用，一般他们的集群规模比较大，不可能通过flink UI进行所有任务的展示，所以就通过metrics上报的方式进行dashboard的展示，同时存储下来的metrics可以用于监控报警，更进一步来说，可以用历史数据进行数据挖掘产生更大的价值。Flink原生的提供了几种主流的第三方上报方式：JMXReporter，GangliaReport，GraphiteReport等，用户可以直接配置使用。
+>Flink Metrics指任务在flink集群中运行过程中的各项指标，包括机器系统指标：Hostname，CPU，Memory，Thread，GC，NetWork，IO 和 任务运行组件指标：JobManager，TaskManager，Job, Task，Operater相关指标。Flink提供metrics的目的有两点：**第一，实时采集metrics的数据供flink UI进行数据展示，用户可以在页面上看到自己提交任务的状态，延迟等信息。第二，对外提供metrics收集接口，用户可以将整个fllink集群的metrics通过MetricsReport上报至第三方系统进行存储，展示和监控。**第二种对大型的互联网公司很有用，一般他们的集群规模比较大，不可能通过flink UI进行所有任务的展示，所以就通过metrics上报的方式进行dashboard的展示，同时存储下来的metrics可以用于监控报警，更进一步来说，可以用历史数据进行数据挖掘产生更大的价值。Flink原生的提供了几种主流的第三方上报方式：**JMXReporter，GangliaReport，GraphiteReport等，用户可以直接配置使用**。
 >
 >Flink Metrics是通过引入com.codahale.metrics包实现的，它将收集的metrics分为四大类：Counter，Gauge，Histogram和Meter下面分别说明：
 >
@@ -1898,9 +2061,9 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 >**Metrics代码解析**
 >那Flink代码中是怎样对metrics进行收集的呢（具体代码在flink-runtime的metrics包里）。下面我们就来按步骤说明：
 >
->1. flink中先会定义好ScopeFormat，scopeFormat定义了各类组件metrics_group的范围，然后各个组件（JobManager，TaskManager，Operator等）都会继承ScopeFormat类进行各自的format实现。
->2. 而后开始定义各个组件的metricsGroup。每个group中定义属于这个组件中所有的metrics。比如TaskIOMetricGroup类，就定义了task执行过程中有关IO的metrics。
->3. 定义好各个metricsGroup后，在初始化各个组件的时候，会将相应的metricsGroup当做参数放入构造函数中进行初始化。我们拿JobManager为例来说：
+>1. flink中先会定义好**ScopeFormat，scopeFormat定义了各类组件metrics_group的范围，然后各个组件（JobManager，TaskManager，Operator等）都会继承ScopeFormat类进行各自的format实现。**
+>2. 而后开始定义各个组件的**metricsGroup**。**每个group中定义属于这个组件中所有的metrics。**比如TaskIOMetricGroup类，就定义了task执行过程中有关IO的metrics。
+>3. **定义好各个metricsGroup后，在初始化各个组件的时候，会将相应的metricsGroup当做参数放入构造函数中进行初始化。我们拿JobManager为例来说**：
 >
 >```text
 >  class JobManager(protected val flinkConfiguration: Configuration,
@@ -1940,8 +2103,8 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 >}   在instantiateMetrics方法内，把相应的metrics都加入到了jobManagerMetricGroup中，这样就建立了metrics和metrics_group的映射关系。
 >```
 >
->1. 随后，在各个组件中实例化MetricRegistryImpl，然后利用MetricRegistry的startQueryService方法启动metrics查询服务（本质上是启动相应的Akka Actor）
->2. 最后，利用flink的原生reporter（主要是上文介绍的三种方式）和MetricRegistry建立联系，这样report里就可以拿出所有采集到的metrics，进而将metrics发往第三方系统。
+>1. 随后，在各个组件中实例化MetricRegistryImpl，然后利用MetricRegistry的startQueryService方法启动metrics查询服务（**本质上是启动相应的Akka Actor**）
+>2. 最后，**利用flink的原生reporter（主要是上文介绍的三种方式）和MetricRegistry建立联系，这样report里就可以拿出所有采集到的metrics，进而将metrics发往第三方系统。**
 >
 >**Metrics配置**
 >当我们了解了flink metrics的具体实现步骤后，那就是上手操作了，怎样配置才能让metrics生效呢？接下来就介绍一下配置步骤：
@@ -1973,7 +2136,7 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 >
 >- 最后保存文件，重启flink集群即可生效s
 >
->如果我们不使用flink原生的MetricsReport，想自己实现定制的Report可以吗？答案是肯定的，用户可以参照GraphiteReporter类，自定义类继承 ScheduledDropwizardReporter类，重写report方法即可。我们现在除了利用GraphiteReport，也自己定义了KafkaReport上报定制的metrics来满足更多的用户需求。
+>**如果我们不使用flink原生的MetricsReport，想自己实现定制的Report可以吗？答案是肯定的，用户可以参照GraphiteReporter类，自定义类继承 ScheduledDropwizardReporter类，重写report方法即可。我们现在除了利用GraphiteReport，也自己定义了KafkaReport上报定制的metrics来满足更多的用户需求。**
 
 ## [Flink Metrics, 官网](https://ci.apache.org/projects/flink/flink-docs-stable/ops/metrics.html#metrics)
 
@@ -1985,13 +2148,13 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 
 >**一、Operator Chain(任务链接)**
 >
->为了更高效地分布式执行，Flink 会尽可能地将 operator 的 subtask 链接（chain）在一起形成 task，每个 task 在一个线程中执行。将 operators 链接成 task 是非常有效的优化：它能减少线程之间的切换，减少消息的序列化/反序列化，减少数据在缓冲区的交换，减少了延迟的同时提高整体的吞吐量。
+>为了更高效地分布式执行，Flink 会尽可能地将 operator 的 subtask 链接（chain）在一起形成 task，每个 task 在一个线程中执行。将 operators 链接成 task 是非常有效的优化：**它能减少线程之间的切换，减少消息的序列化/反序列化，减少数据在缓冲区的交换，减少了延迟的同时提高整体的吞吐量。**
 >
 >Flink 会在生成 **JobGraph 阶段**，将代码中可以优化的算子优化成一个算子链（Operator Chains）以放到一个 task（一个线程）中执行，以减少线程之间的切换和缓冲的开销，提高整体的吞吐量和延迟。
 >
 >**二、Slot Sharing（槽位共享）**
 >
->Slot Sharing 是指，来自同一个 Job 且拥有相同 slotSharingGroup（默认：default）名称的不同 Task 的 SubTask 之间**可以共享一个 Slot**，这使得一个 Slot 有机会持有 Job 的一整条 Pipeline，这也是上文提到的**在默认 slotSharing 的条件下 Job 启动所需的 Slot 数和 Job 中 Operator 的最大 parallelism 相等的原因**。通过 Slot Sharing 机制可以更进一步提高 Job 运行性能，在 Slot 数不变的情况下增加了 Operator 可设置的最大的并行度，让类似 window 这种消耗资源的 Task 以最大的并行度分布在不同 TM 上，同时像 map、filter 这种较简单的操作也不会独占 Slot 资源，降低资源浪费的可能性。
+>**Slot Sharing 是指，来自同一个 Job 且拥有相同 slotSharingGroup（默认：default）名称的不同 Task 的 SubTask** 之间**可以共享一个 Slot**，这使得一个 Slot 有机会持有 Job 的一整条 Pipeline，这也是上文提到的**在默认 slotSharing 的条件下 Job 启动所需的 Slot 数和 Job 中 Operator 的最大 parallelism 相等的原因**。通过 Slot Sharing 机制可以更进一步提高 Job 运行性能，**在 Slot 数不变的情况下增加了 Operator 可设置的最大的并行度，让类似 window 这种消耗资源的 Task 以最大的并行度分布在不同 TM 上，同时像 map、filter 这种较简单的操作也不会独占 Slot 资源，降低资源浪费的可能性。**
 >
 >**三、Flink 异步 IO**
 >
@@ -2005,23 +2168,23 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 >
 >使用 checkpoint 的使用建议
 >
->■ Checkpoint 间隔不要太短
+>■ **Checkpoint 间隔不要太短**
 >
->虽然理论上 Flink 支持很短的 checkpoint 间隔，但是在实际生产中，过短的间隔对于底层分布式文件系统而言，会带来很大的压力。另一方面，由于检查点的语义，所以实际上 Flink 作业处理 record 与执行 checkpoint 存在互斥锁，过于频繁的 checkpoint，可能会影响整体的性能。当然，这个建议的出发点是底层分布式文件系统的压力考虑。
+>虽然理论上 Flink 支持很短的 checkpoint 间隔，但是在实际生产中，**过短的间隔对于底层分布式文件系统而言，会带来很大的压力**。另一方面，**由于检查点的语义，所以实际上 Flink 作业处理 record 与执行 checkpoint 存在互斥锁，过于频繁的 checkpoint，可能会影响整体的性能**。当然，这个建议的出发点是底层分布式文件系统的压力考虑。
 >
->■ 合理设置超时时间
+>■ **合理设置超时时间**
 >
 >默认的超时时间是 10min，如果 state 规模大，则需要合理配置。**最坏情况是分布式地创建速度大于单点**（job master 端）的删除速度，导致整体存储集群可用空间压力较大。**建议当检查点频繁因为超时而失败时，增大超时时间。**
 >
 >**五、资源配置**
 >
->1、并行度（parallelism）：保证足够的并行度，并行度也不是越大越好，太多会加重数据在多个solt/task manager之间数据传输压力，包括序列化和反序列化带来的压力。
+>1、**并行度（parallelism）**：保证足够的并行度，并行度也不是越大越好，太多会加重数据在多个solt/task manager之间数据传输压力，包括序列化和反序列化带来的压力。
 >
->2、CPU：CPU资源是task manager上的solt共享的，注意监控CPU的使用。
+>2、**CPU**：CPU资源是**task manager上的solt共享的，注意监控CPU的使用。**
 >
->3、内存：内存是分solt隔离使用的，注意存储大state的时候，内存要足够。
+>3、**内存**：内存是**分solt隔离使用的**，注意存储大state的时候，内存要足够。
 >
->4、网络：大数据处理，flink节点之间数据传输会很多，服务器网卡尽量使用万兆网卡。
+>4、**网络**：大数据处理，flink节点之间数据传输会很多，服务器网卡尽量使用万兆网卡。
 >
 >**总结**
 >
@@ -2047,9 +2210,9 @@ https://cloud.tencent.com/developer/article/1398203
 
 >## **小结**
 >
->- ParameterTool提供了fromPropertiesFile、fromArgs、fromSystemProperties、fromMap静态方法用于创建ParameterTool
+>- ParameterTool提供了**fromPropertiesFile、fromArgs、fromSystemProperties、fromMap静态方法用于创建ParameterTool**
 >- ParameterTool提供了get、getRequired、getInt、getLong、getFloat、getDouble、getBoolean、getShort、getByte等方法，每种类型的get均提供了一个支持defaultValue的方法
->- ParameterTool继承了ExecutionConfig.GlobalJobParameters，其toMap方法返回的是data属性；使用env.getConfig().setGlobalJobParameters可以将ParameterTool的访问范围设置为global
+>- ParameterTool**继承了ExecutionConfig.GlobalJobParameters，其toMap方法返回的是data属性；使用env.getConfig().setGlobalJobParameters可以将ParameterTool的访问范围设置为global**
 >
 >## **doc**
 >
@@ -2080,8 +2243,6 @@ https://cloud.tencent.com/developer/article/1398203
 ## flink架构：运行时的组件和基本原理
 
 ![image-20200822142606745](./flink_img/image-20200822142606745.png)
-
-
 
 ![image-20200822142714716](./flink_img/image-20200822142714716.png)
 
@@ -2151,12 +2312,6 @@ P52 TaskManager 会在同一个JVM进程内部以多线程的方式执行任务�
 
 ![image-20200823164225211](./flink_img/image-20200823164225211.png)
 
-### flink DataStream API：聚合算子
-
-reduce((x,y)->)
-
-![image-20200823174512259](./flink_img/image-20200823174512259.png)
-
 ### [Flink DataStream API（六）多流转换算子](https://www.bilibili.com/video/av77403752?p=20)
 
 <img src="./flink_img/image-20200823174814107.png" alt="image-20200823174814107" style="zoom:53%;" />
@@ -2191,11 +2346,11 @@ JobManager 用于控制流式应用执行以及保存该过程中的元数据（
 
 JobManager 发生故障时，其下的所有任务都会取消，新接手的JobManager 会执行一下步骤：
 
-1、向zk请求存储位置，以获取 JobGraph、JAR 文件 以及 应用最新检查点在远程存储的状态句柄（存储位置）。
+**1、向zk请求存储位置，以获取 JobGraph、JAR 文件 以及 应用最新检查点在远程存储的状态句柄（存储位置）。**
 
-2、向ResourceManager 申请处理槽来继续执行应用。
+**2、向ResourceManager 申请处理槽来继续执行应用。**
 
-3、重启应用并利用最近一次检查点重置任务状态。
+**3、重启应用并利用最近一次检查点重置任务状态。**
 
 
 
@@ -2205,7 +2360,7 @@ JobManager 发生故障时，其下的所有任务都会取消，新接手的Job
 
 任务内部的时间（time service）会维护一些计时器，它们依靠水位线来激活。
 
-水位线--更新--》分区水位线----最小值更新----》事件时间时钟
+**水位线--更新--》分区水位线----最小值更新----》事件时间时钟**
 
 P63： 不同输入流的事件时间应该对齐。
 
@@ -2265,13 +2420,13 @@ public TriggerResult onEventTime(long time, TimeWindow window, TriggerContext ct
 
 ## P101 滚动聚合
 
-作用于Keystream上，滚动聚合会为每个处理过的键值维护一个状态，这些状态不会自动清理，所以滚动聚合算子**只能用于键值域有限的流**。
+作用于Keystream上，**滚动聚合会为每个处理过的键值维护一个状态，**这些状态不会自动清理，所以滚动聚合算子**只能用于键值域有限的流**。
 
 ## P112 类型信息
 
-Flink有**类型提取系统**，可以分析函数的输入和输出类型来自动获取类型信息，**继而得到相应的序列化器和反序列化器**，但是如果使用了 Lamda函数或者泛型信息类型，**必须显式指定类型信息才能启动应用或提高性能**。
+Flink有**类型提取系统**，可以分析函数的输入和输出类型来自动获取类型信息，**继而得到相应的序列化器和反序列化器**，但是如果使用了 **Lamda函数或者泛型信息类型**，**必须显式指定类型信息才能启动应用或提高性能**。
 
-Flink 中一个名为类型提取器的组件会分析所有函数的泛型类型及返回类型，以获取相应的 TypeInformation对象，如果在一些类型提取器失灵的情况下，你需要为特定的数据类型生成 TypeInformation。
+Flink 中一个名为**类型提取器的组件**会分析所有函数的泛型类型及返回类型，以获取相应的 TypeInformation对象，如果在一些类型提取器失灵的情况下，你需要为特定的数据类型生成 TypeInformation。
 
 java 使用Types类。
 
@@ -2339,7 +2494,7 @@ Rich开头，有open() 和 close() 方法, getRuntimeContext() 获取 RuntimeCon
 public abstract class WindowAssigner<T, W extends Window> implements Serializable 
 ```
 
-任务内部的时间服务（time service）会维护一些计时器（timer），他们依靠接收到的水位线来激活。
+**任务内部的时间服务（time service）会维护一些计时器（timer），他们依靠接收到的水位线来激活。**
 
  * 1. 基于水位线记录的时间戳更新内部时间时钟。
  * 2. 任务的时间服务会找到所有触发时间小于更新后事件时间时钟的计时器。对于每个到期的计时器，调用回调函数（onEventTime 或者 onProcessingTime，onTimer等等），利用它来执行计算或发出记录。
@@ -2347,8 +2502,8 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
 ## P187 使用 CheckedpointedFunction 接口
 
-* initializeState()
-* snapshotSate()
+* **initializeState()**
+* **snapshotSate()**
 
 ## P66 状态
 
@@ -2356,7 +2511,7 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
 ### 算子状态
 
-算子状态的作用域是某个算子任务，同一个并行任务内的记录都能访问到相同的状态。算子状态不能通过其他任务访问，无论该任务是否来自相同算子。
+**算子状态的作用域是某个算子任务**，同一个并行任务内的记录都能访问到相同的状态。算子状态不能通过其他任务访问，无论该任务是否来自相同算子。
 
 ####    列表状态 （list state）
 
@@ -2366,7 +2521,7 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
 ### 键值分区状态
 
-键控状态是根据输入数据流中定义的键（key）来维护和访问的。Flink 为每个键值维护一个状态实例，并将具有相同键的所有数据，都分区到同一个算子任务中，**这个任务会维护和处理这个key 对应的状态。当任务处理一条数据时，它会自动将状态的访问范围限定为当前数据的 key。**因此，具有相同 key 的所有数据都会访问相同的状态。Keyed State 很类似于一个分布式的key-value map 数据结构，只能用于 KeyedStream（ keyBy 算子处理之后）。
+**键控状态是根据输入数据流中定义的键（key）来维护和访问的。**Flink 为每个键值维护一个状态实例，并将具有相同键的所有数据，都分区到同一个算子任务中，**这个任务会维护和处理这个key 对应的状态。当任务处理一条数据时，它会自动将状态的访问范围限定为当前数据的 key。**因此，具有相同 key 的所有数据都会访问相同的状态。Keyed State 很类似于一个分布式的key-value map 数据结构，只能用于 KeyedStream（ keyBy 算子处理之后）。
 
 #### 单值状态 （value state）
 
@@ -2403,7 +2558,7 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
 ## P68 对有状态算子的扩缩容
 
-保存点、算子标识、最大并行度
+**保存点、算子标识、最大并行度**
 
 ## p190 确保有状态应用的可维护性
 
@@ -2431,11 +2586,11 @@ Flink 默认情况下不允许那些无法将保存点中的状态全部恢复�
 
 Flink 的**检查点和恢复机制结合可重置的数据源连接器能够保证应用不会丢失数据**，但可能发出重复的数据。若想提供端到端的一致性保障，需要特殊的数据汇连接器实现。数据汇连接器需要实现两种技术：**幂等性写和事务性写**。
 
-Flink 提供了两个构件来实现**事务性**的数据汇连接器：一个通用性的 WAL（write ahead log，写前日志）数据汇和一个2PC（two-phase commit，两阶段提交）数据汇。
+Flink 提供了两个构件来实现**事务性**的数据汇连接器：**一个通用性的 WAL（write ahead log，写前日志）数据汇和一个2PC（two-phase commit，两阶段提交）数据汇。**
 
 ## P221 读写kafka连接器，自定义分区和写入消息时间戳
 
-Kafka数据汇允许你自定义分区器，默认的分区器会将每个数据汇任务映射到一个单独的Kafka分区。如果任务数多余分区数，则每个分区会包含多个任务发来的记录，如果分区数多于任务数，就会导致有些分区收不到数据。如果恰好有使用了事件时间的Flink应用消费了该主题，那么可能会导致问题。
+**Kafka数据汇允许你自定义分区器，默认的分区器会将每个数据汇任务映射到一个单独的Kafka分区。**如果任务数多余分区数，则每个分区会包含多个任务发来的记录，如果分区数多于任务数，就会导致有些分区收不到数据。如果恰好有使用了事件时间的Flink应用消费了该主题，那么可能会导致问题。
 
 ## P239 事务性数据汇连接器
 
