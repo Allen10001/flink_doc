@@ -203,6 +203,482 @@ https://gitlab.bigdata.letv.com/data-realtime/rdp.jobs.mob   中的 rdp.mob.ios.
 
 # 官网资料
 
+## table api 之 hive
+
+https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/overview/
+
+Flink 与 Hive 的集成包含两个层面。
+
+一是**利用了 Hive 的 MetaStore 作为持久化的 Catalog，用户可通过`HiveCatalog`将不同会话中的 Flink 元数据存储到 Hive Metastore 中。** 例如，用户可以使用`HiveCatalog`将其 Kafka 表或 Elasticsearch 表存储在 Hive Metastore 中，并后续在 SQL 查询中重新使用它们。
+
+二是**利用 Flink 来读写 Hive 的表。**
+
+`HiveCatalog`的设计提供了与 Hive 良好的兼容性，用户可以"开箱即用"的访问其已有的 Hive 数仓。 您不需要修改现有的 Hive Metastore，也不需要更改表的数据位置或分区。
+
+## hive 方言
+
+- Hive 方言主要是在批模式下使用的，某些 Hive 的语法([Sort/Cluster/Distributed BY](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/dev/table/hive-compatibility/hive-dialect/queries/sort-cluster-distribute-by/), [Transform](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/dev/table/hive-compatibility/hive-dialect/queries/transform/), 等)还没有在流模式下支持。
+
+### Table API [#](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/dev/table/hive-compatibility/hive-dialect/overview/#table-api)
+
+你可以使用 Table API 为 TableEnvironment 设置方言。
+
+Java
+
+```java
+EnvironmentSettings settings = EnvironmentSettings.inStreamingMode();
+TableEnvironment tableEnv = TableEnvironment.create(settings);
+
+// to use hive dialect
+tableEnv.getConfig().setSqlDialect(SqlDialect.HIVE);
+
+// to use default dialect
+tableEnv.getConfig().setSqlDialect(SqlDialect.DEFAULT);
+```
+
+## Hive Catalog
+
+**Hive Metastore has evolved into the de facto metadata hub over the years in Hadoop ecosystem. Many companies have a single Hive Metastore service instance in their production to manage all of their metadata, either Hive metadata or non-Hive metadata, as the source of truth.**
+
+For users who have both Hive and Flink deployments, **`HiveCatalog` enables them to use Hive Metastore to manage Flink’s metadata.**
+
+For users who have just Flink deployment, `HiveCatalog` is the only persistent catalog provided out-of-box by Flink. **Without a persistent catalog, users using [Flink SQL CREATE DDL](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/dev/table/sql/create/) have to repeatedly create meta-objects like a Kafka table in each session, which wastes a lot of time. `HiveCatalog` fills this gap by empowering users to create tables and other meta-objects only once, and reference and manage them with convenience later on across sessions.**
+
+## [How to use HiveCatalog](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_catalog/)
+
+`HiveCatalog` can be used to handle two kinds of tables: **Hive-compatible tables and generic tables.** Hive-compatible tables are those stored in a Hive-compatible way, in terms of **both metadata and data in the storage layer**. Therefore, **Hive-compatible tables created via Flink can be queried from Hive side.**
+
+**Generic tables, on the other hand, are specific to Flink. When creating generic tables with `HiveCatalog`, we’re just using HMS to persist the metadata. While these tables are visible to Hive, it’s unlikely Hive is able to understand the metadata. And therefore using such tables in Hive leads to undefined behavior.**
+
+#### step 1: set up a Hive Metastore
+
+#### step 2: start SQL Client, and create a Hive catalog with Flink SQL DDL
+
+Add all Hive dependencies to `/lib` dir in Flink distribution, and create a Hive catalog in Flink SQL CLI as following:
+
+```sql
+Flink SQL> CREATE CATALOG myhive WITH (
+  'type' = 'hive',
+  'hive-conf-dir' = '/opt/hive-conf'
+);
+```
+
+#### step 3: set up a Kafka cluster
+
+Bootstrap a local Kafka cluster with a topic named “test”, and produce some simple data to the topic as tuple of name and age.
+
+#### step 4: create a Kafka table with Flink SQL DDL
+
+**Create a simple Kafka table with Flink SQL DDL, and verify its schema.**
+
+```sql
+Flink SQL> USE CATALOG myhive;
+
+Flink SQL> CREATE TABLE mykafka (name String, age Int) WITH (
+   'connector.type' = 'kafka',
+   'connector.version' = 'universal',
+   'connector.topic' = 'test',
+   'connector.properties.bootstrap.servers' = 'localhost:9092',
+   'format.type' = 'csv',
+   'update-mode' = 'append'
+);
+[INFO] Table has been created.
+
+Flink SQL> DESCRIBE mykafka;
+root
+ |-- name: STRING
+ |-- age: INT
+```
+
+Verify the table is also visible to Hive via Hive Cli:
+
+```bash
+hive> show tables;
+OK
+mykafka
+Time taken: 0.038 seconds, Fetched: 1 row(s)
+```
+
+#### step 5: run Flink SQL to query the Kafka table 
+
+Run a simple select query from Flink SQL Client in a Flink cluster, either standalone or yarn-session.
+
+```bash
+Flink SQL> select * from mykafka;
+```
+
+
+
+## [Hive 读 & 写](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_read_write/)
+
+通过使用 `HiveCatalog`，Apache Flink 可以对 Apache Hive 表做统一的批和流处理。这意味着 **Flink 可以成为 Hive 批处理引擎的一个性能更好的选择，或者连续读写 Hive 表中的数据以支持实时数据仓库应用。**
+
+## hive 读
+
+Flink 支持以批和流两种模式从 Hive 表中读取数据。**批读的时候，Flink 会基于执行查询时表的状态进行查询。流读时将持续监控表，并在表中新数据可用时进行增量获取，默认情况下，Flink 将以批模式读取数据。**
+
+**流读支持消费分区表和非分区表。**对于分区表，**Flink 会监控新分区的生成，并且在数据可用的情况下增量获取数据。对于非分区表，Flink 将监控文件夹中新文件的生成，并增量地读取新文件。**
+
+
+
+| 键                                    | 默认值         | 类型     | 描述                                                         |
+| :------------------------------------ | :------------- | :------- | :----------------------------------------------------------- |
+| streaming-source.enable               | false          | Boolean  | 是否启动流读。注意：请确保每个分区/文件都应该原子地写入，否则读取不到完整的数据。 |
+| streaming-source.partition.include    | all            | String   | **选择读取的分区，可选项为 `all` 和 `latest`，`all` 读取所有分区；`latest` 读取按照 'streaming-source.partition.order' 排序后的最新分区，`latest` 仅在流模式的 Hive 源表作为时态表时有效。**默认的选项是 `all`。在开启 'streaming-source.enable' 并设置 'streaming-source.partition.include' 为 'latest' 时，Flink 支持 temporal join 最新的 Hive 分区，同时，用户可以通过配置分区相关的选项来配置分区比较顺序和数据更新时间间隔。 |
+| streaming-source.monitor-interval     | None           | Duration | **连续监控分区/文件的时间间隔。** 注意: 默认情况下，流式读 Hive 的间隔为 '1 min'，但流读 Hive 的 temporal join 的默认时间间隔是 '60 min'，这是因为当前流读 Hive 的 temporal join 实现上有一个框架限制，即每个 TM 都要访问 Hive metastore，这可能会对 metastore 产生压力，这个问题将在未来得到改善。 |
+| streaming-source.partition-order      | partition-name | String   | **streaming source 分区排序，支持 create-time， partition-time 和 partition-name。** create-time 比较分区/文件创建时间， 这不是 Hive metastore 中创建分区的时间，而是文件夹/文件在文件系统的修改时间，如果分区文件夹以某种方式更新，比如添加在文件夹里新增了一个文件，它会影响到数据的使用。partition-time 从分区名称中抽取时间进行比较。partition-name 会比较分区名称的字典顺序。**对于非分区的表，总是会比较 'create-time'。对于分区表默认值是 'partition-name'。该选项与已经弃用的 'streaming-source.consume-order' 的选项相同。** |
+| streaming-source.consume-start-offset | None           | String   | **流模式起始消费偏移量。**如何解析和比较偏移量取决于你指定的顺序。对于 create-time 和 partition-time，会比较时间戳 (yyyy-[m]m-[d]d [hh:mm:ss])。对于 partition-time，**将使用分区时间提取器从分区名字中提取的时间。** 对于 partition-name，是字符串类型的分区名称(比如 pt_year=2020/pt_mon=10/pt_day=01)。 |
+
+[SQL Hints](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/dev/table/sql/queries/hints/) 可以在不改变 Hive metastore 的情况下配置 Hive table 的属性。
+
+```sql
+SELECT * 
+FROM hive_table 
+/*+ OPTIONS('streaming-source.enable'='true', 'streaming-source.consume-start-offset'='2020-05-20') */;
+```
+
+**注意**
+
+- **监控策略是扫描当前位置路径中的所有目录/文件，分区太多可能导致性能下降。**
+- 流读非分区表时要求每个文件应原子地写入目标目录。
+- **流读分区表要求每个分区应该被原子地添加进 Hive metastore 中。如果不是的话，只有添加到现有分区的新数据会被消费。**
+- 流读 Hive 表不支持 Flink DDL 的 watermark 语法。这些表不能被用于窗口算子。
+
+### 读取 Hive Views [#](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_read_write/#读取-hive-views)
+
+Flink 能够读取 Hive 中已经定义的视图。但是也有一些限制：
+
+1. Hive catalog 必须设置成当前的 catalog 才能查询视图。在 Table API 中使用 `tableEnv.useCatalog(...)`，或者在 SQL 客户端使用 `USE CATALOG ...` 来改变当前 catalog。
+2. Hive 和 Flink SQL 的语法不同, 比如不同的关键字和字面值。请确保对视图的查询语法与 Flink 语法兼容。
+
+### Source 并发推断 [#](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_read_write/#source-并发推断)
+
+默认情况下，Flink 会基于文件的数量，以及每个文件中块的数量推断出读取 Hive 的最佳并行度。
+
+Flink 允许你灵活的配置并发推断策略。你可以在 `TableConfig` 中配置以下参数(注意这些参数会影响当前作业的所有 source)：
+
+| 键                                           | 默认值 | 类型    | 描述                                                         |
+| :------------------------------------------- | :----- | :------ | :----------------------------------------------------------- |
+| table.exec.hive.infer-source-parallelism     | true   | Boolean | 如果是 true，会根据 split 的数量推断 source 的并发度。如果是 false，source 的并发度由配置决定。 |
+| table.exec.hive.infer-source-parallelism.max | 1000   | Integer | 设置 source operator 推断的最大并发度。                      |
+
+### 加载分区切片 [#](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_read_write/#加载分区切片)
+
+**Flink 使用多个线程并发将 Hive 分区切分成多个 split 进行读取。**你可以使用 `table.exec.hive.load-partition-splits.thread-num` 去配置线程数。默认值是3，你配置的值应该大于0。
+
+### 读取带有子目录的分区 [#](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_read_write/#读取带有子目录的分区)
+
+在某些情况下，你或许会创建一个引用其他表的外部表，但是该表的分区列是另一张表分区字段的子集。 比如，你创建了一个分区表 `fact_tz`，分区字段是 `day` 和 `hour`：
+
+```sql
+CREATE TABLE fact_tz(x int) PARTITIONED BY (day STRING, hour STRING);
+```
+
+然后你基于 `fact_tz` 表创建了一个外部表 `fact_daily`，并使用了一个粗粒度的分区字段 `day`：
+
+```sql
+CREATE EXTERNAL TABLE fact_daily(x int) PARTITIONED BY (ds STRING) LOCATION '/path/to/fact_tz';
+```
+
+当读取外部表 `fact_daily` 时，该表的分区目录下存在子目录(`hour=1` 到 `hour=24`)。
+
+默认情况下，可以将带有子目录的分区添加到外部表中。Flink SQL 会递归扫描所有的子目录，并获取所有子目录中数据。
+
+```sql
+ALTER TABLE fact_daily ADD PARTITION (ds='2022-07-07') location '/path/to/fact_tz/ds=2022-07-07';
+```
+
+你可以设置作业属性 `table.exec.hive.read-partition-with-subdirectory.enabled` (默认为 `true`) 为 `false` 以禁止 Flink 读取子目录。 如果你设置成 `false` 并且分区目录下不包含任何子目录，Flink 会抛出 `java.io.IOException: Not a file: /path/to/data/*` 异常。
+
+## 时态表 Join [#](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_read_write/#时态表-join)
+
+你可以使用 Hive 表作为时态表，然后一个数据流就可以使用 temporal join 关联 Hive 表。 请参照 [temporal join](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/dev/table/sql/queries/joins/#temporal-joins) 获取更多关于 temporal join 的信息。
+
+Flink 支持 processing-time temporal join Hive 表，processing-time temporal join 总是关联最新版本的时态表。 Flink 支持 temporal join Hive 的分区表和非分区表，对于分区表，Flink 支持自动跟踪 Hive 表的最新分区。
+
+**注意: Flink 还不支持 event-time temporal join Hive 表。**
+
+### Temporal Join 最新的分区 [#](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_read_write/#temporal-join-最新的分区)
+
+**对于随时变化的分区表，我们可以把它看作是一个无界流进行读取，如果每个分区包含完整数据，则分区可以作为时态表的一个版本，时态表的版本保存分区的数据。**
+
+**Flink 支持在使用 processing time temporal join 时自动追踪最新的分区（版本），通过 `streaming-source.partition-order` 定义最新的分区（版本）。 用户最常使用的案例就是在 Flink 流作业中使用 Hive 表作为维度表。**
+
+**注意:** 该特性仅支持 Flink 流模式。
+
+下面的案例演示了经典的业务 pipeline，**使用 Hive 中的表作为维度表，它们由每天一次的批任务或者 Flink 任务来更新。 Kafka 数据流来自实时在线业务数据或者日志，该流需要关联维度表以丰富数据流。**
+
+```sql
+-- 假设 Hive 表中的数据每天更新, 每天包含最新和完整的维度数据
+SET table.sql-dialect=hive;
+CREATE TABLE dimension_table (
+  product_id STRING,
+  product_name STRING,
+  unit_price DECIMAL(10, 4),
+  pv_count BIGINT,
+  like_count BIGINT,
+  comment_count BIGINT,
+  update_time TIMESTAMP(3),
+  update_user STRING,
+  ...
+) PARTITIONED BY (pt_year STRING, pt_month STRING, pt_day STRING) TBLPROPERTIES (
+  -- using default partition-name order to load the latest partition every 12h (the most recommended and convenient way)
+  'streaming-source.enable' = 'true',
+  'streaming-source.partition.include' = 'latest',
+  'streaming-source.monitor-interval' = '12 h',
+  'streaming-source.partition-order' = 'partition-name',  -- 有默认的配置项，可以不填。
+
+  -- using partition file create-time order to load the latest partition every 12h
+  'streaming-source.enable' = 'true',
+  'streaming-source.partition.include' = 'latest',
+  'streaming-source.partition-order' = 'create-time',
+  'streaming-source.monitor-interval' = '12 h'
+
+  -- using partition-time order to load the latest partition every 12h
+  'streaming-source.enable' = 'true',
+  'streaming-source.partition.include' = 'latest',
+  'streaming-source.monitor-interval' = '12 h',
+  'streaming-source.partition-order' = 'partition-time',
+  'partition.time-extractor.kind' = 'default',
+  'partition.time-extractor.timestamp-pattern' = '$pt_year-$pt_month-$pt_day 00:00:00' 
+);
+
+SET table.sql-dialect=default;
+CREATE TABLE orders_table (
+  order_id STRING,
+  order_amount DOUBLE,
+  product_id STRING,
+  log_ts TIMESTAMP(3),
+  proctime as PROCTIME()
+) WITH (...);
+
+
+-- streaming sql, kafka temporal join Hive 维度表. Flink 将在 'streaming-source.monitor-interval' 的间隔内自动加载最新分区的数据。
+
+SELECT * FROM orders_table AS o 
+JOIN dimension_table FOR SYSTEM_TIME AS OF o.proctime AS dim
+ON o.product_id = dim.product_id;
+```
+
+### Temporal Join 最新的表 [#](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_read_write/#temporal-join-最新的表)
+
+对于 Hive 表，我们可以把它看作是一个无界流进行读取，在这个案例中，当我们查询时只能去追踪最新的版本。 最新版本的表保留了 Hive 表的所有数据。
+
+**当 temporal join 最新的 Hive 表，Hive 表会缓存到 Slot 内存中，并且数据流中的每条记录通过 key 去关联表找到对应的匹配项。 使用最新的 Hive 表作为时态表不需要额外的配置。作为可选项，您可以使用以下配置项配置 Hive 表缓存的 TTL。当缓存失效，Hive 表会重新扫描并加载最新的数据。**
+
+| 键                    | 默认值 | 类型     | 描述                                                         |
+| :-------------------- | :----- | :------- | :----------------------------------------------------------- |
+| lookup.join.cache.ttl | 60 min | Duration | 在 lookup join 时构建表缓存的 TTL (例如 10min)。默认的 TTL 是60分钟。注意: 该选项仅在 lookup 表为有界的 Hive 表时有效，如果你使用流式的 Hive 表作为时态表，请使用 'streaming-source.monitor-interval' 去配置数据更新的间隔。 |
+
+下面的案例演示加载 Hive 表的所有数据作为时态表。
+
+```sql
+-- 假设 Hive 表中的数据被批处理 pipeline 覆盖。
+SET table.sql-dialect=hive;
+CREATE TABLE dimension_table (
+  product_id STRING,
+  product_name STRING,
+  unit_price DECIMAL(10, 4),
+  pv_count BIGINT,
+  like_count BIGINT,
+  comment_count BIGINT,
+  update_time TIMESTAMP(3),
+  update_user STRING,
+  ...
+) TBLPROPERTIES (
+  'streaming-source.enable' = 'false',           -- 有默认的配置项，可以不填。
+  'streaming-source.partition.include' = 'all',  -- 有默认的配置项，可以不填。
+  'lookup.join.cache.ttl' = '12 h'
+);
+
+SET table.sql-dialect=default;
+CREATE TABLE orders_table (
+  order_id STRING,
+  order_amount DOUBLE,
+  product_id STRING,
+  log_ts TIMESTAMP(3),
+  proctime as PROCTIME()
+) WITH (...);
+
+
+-- streaming sql, kafka join Hive 维度表. 当缓存失效时 Flink 会加载维度表的所有数据。
+
+SELECT * FROM orders_table AS o 
+JOIN dimension_table FOR SYSTEM_TIME AS OF o.proctime AS dim
+ON o.product_id = dim.product_id;
+```
+
+注意:
+
+1. **每个参与 join 的 subtask 需要在他们的缓存中保留 Hive 表。请确保 Hive 表可以放到 TM task slot 中。**
+2. 建议把这两个选项配置成较大的值 `streaming-source.monitor-interval`(最新的分区作为时态表) 和 `lookup.join.cache.ttl`(所有的分区作为时态表)。否则，**任务会频繁更新和加载表，容易出现性能问题。**
+3. 目前，**缓存刷新的时候会重新加载整个 Hive 表，所以没有办法区分数据是新数据还是旧数据。**
+
+## hive写 [#](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_read_write/#写)
+
+Flink 支持批和流两种模式往 Hive 中写入数据，当作为批程序，只有当作业完成时，Flink 写入 Hive 表的数据才能被看见。批模式写入支持追加到现有的表或者覆盖现有的表。
+
+```sql
+# ------ INSERT INTO 将追加到表或者分区，保证数据的完整性 ------ 
+Flink SQL> INSERT INTO mytable SELECT 'Tom', 25;
+
+# ------ INSERT OVERWRITE 将覆盖表或者分区中所有已经存在的数据 ------ 
+Flink SQL> INSERT OVERWRITE mytable SELECT 'Tom', 25;
+```
+
+还可以将数据插入到特定的分区中。
+
+```sql
+# ------ 插入静态分区 ------ 
+Flink SQL> INSERT OVERWRITE myparttable PARTITION (my_type='type_1', my_date='2019-08-08') SELECT 'Tom', 25;
+
+# ------ 插入动态分区 ------ 
+Flink SQL> INSERT OVERWRITE myparttable SELECT 'Tom', 25, 'type_1', '2019-08-08';
+
+# ------ 插入静态(my_type)和动态(my_date)分区 ------ 
+Flink SQL> INSERT OVERWRITE myparttable PARTITION (my_type='type_1') SELECT 'Tom', 25, '2019-08-08';
+```
+
+流写会不断的往 Hive 中添加新数据，提交记录使它们可见。用户可以通过几个属性控制如何触发提交。**流写不支持 `Insert overwrite` 。**
+
+下面的案例演示如何流式地从 Kafka 写入 Hive 表并执行分区提交，然后运行一个批处理查询将数据读出来。
+
+请参阅 [streaming sink](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/filesystem/#streaming-sink) 获取可用配置的完整列表。
+
+```sql
+SET table.sql-dialect=hive;
+CREATE TABLE hive_table (
+  user_id STRING,
+  order_amount DOUBLE
+) PARTITIONED BY (dt STRING, hr STRING) STORED AS parquet TBLPROPERTIES (
+  'partition.time-extractor.timestamp-pattern'='$dt $hr:00:00',
+  'sink.partition-commit.trigger'='partition-time',
+  'sink.partition-commit.delay'='1 h',
+  'sink.partition-commit.policy.kind'='metastore,success-file'
+);
+
+SET table.sql-dialect=default;
+CREATE TABLE kafka_table (
+  user_id STRING,
+  order_amount DOUBLE,
+  log_ts TIMESTAMP(3),
+  WATERMARK FOR log_ts AS log_ts - INTERVAL '5' SECOND -- 在 TIMESTAMP 列声明 watermark。
+) WITH (...);
+
+-- streaming sql, insert into hive table
+INSERT INTO TABLE hive_table 
+SELECT user_id, order_amount, DATE_FORMAT(log_ts, 'yyyy-MM-dd'), DATE_FORMAT(log_ts, 'HH')
+FROM kafka_table;
+
+-- batch sql, select with partition pruning
+SELECT * FROM hive_table WHERE dt='2020-05-20' and hr='12';
+```
+
+**如果在 TIMESTAMP_LTZ 列定义了 watermark 并且使用 `partition-time` 提交，需要对 `sink.partition-commit.watermark-time-zone` 设置会话时区，否则分区提交会发生在几个小时后。**
+
+```sql
+SET table.sql-dialect=hive;
+CREATE TABLE hive_table (
+  user_id STRING,
+  order_amount DOUBLE
+) PARTITIONED BY (dt STRING, hr STRING) STORED AS parquet TBLPROPERTIES (
+  'partition.time-extractor.timestamp-pattern'='$dt $hr:00:00',
+  'sink.partition-commit.trigger'='partition-time',
+  'sink.partition-commit.delay'='1 h',
+  'sink.partition-commit.watermark-time-zone'='Asia/Shanghai', -- 假设用户配置的时区是 'Asia/Shanghai'。
+  'sink.partition-commit.policy.kind'='metastore,success-file'
+);
+
+SET table.sql-dialect=default;
+CREATE TABLE kafka_table (
+  user_id STRING,
+  order_amount DOUBLE,
+  ts BIGINT, -- time in epoch milliseconds
+  ts_ltz AS TO_TIMESTAMP_LTZ(ts, 3),
+  WATERMARK FOR ts_ltz AS ts_ltz - INTERVAL '5' SECOND -- 在 TIMESTAMP_LTZ 列声明 watermark。
+) WITH (...);
+
+-- streaming sql, insert into hive table
+INSERT INTO TABLE hive_table 
+SELECT user_id, order_amount, DATE_FORMAT(ts_ltz, 'yyyy-MM-dd'), DATE_FORMAT(ts_ltz, 'HH')
+FROM kafka_table;
+
+-- batch sql, select with partition pruning
+SELECT * FROM hive_table WHERE dt='2020-05-20' and hr='12';
+```
+
+默认情况下，对于流，Flink 仅支持重命名 committers，对于 S3 文件系统不支持流写的 exactly-once 语义。 通过将以下参数设置为 false，可以实现 exactly-once 写入 S3。 **这会调用 Flink 原生的 writer ，但是仅针对 parquet 和 orc 文件类型有效。 这个配置项可以在 `TableConfig` 中配置，该配置项对作业的所有 sink 都生效。**
+
+| 键                                     | 默认值 | 类型    | 描述                                                         |
+| :------------------------------------- | :----- | :------ | :----------------------------------------------------------- |
+| table.exec.hive.fallback-mapred-writer | true   | Boolean | 如果是 false，使用 Flink 原生的 writer 去写 parquet 和 orc 文件；如果是 true，使用 hadoop mapred record writer 去写 parquet 和 orc 文件。 |
+
+### 动态分区的写入 [#](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_read_write/#动态分区的写入)
+
+### 动态分区的写入 [#](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/connectors/table/hive/hive_read_write/#动态分区的写入)
+
+**不同于静态分区的写入总是需要用户指定分区列的值，动态分区允许用户在写入数据的时候不指定分区列的值。** 比如，有这样一个分区表：
+
+```sql
+CREATE TABLE fact_tz(x int) PARTITIONED BY (day STRING, hour STRING);
+```
+
+**用户可以使用如下的 SQL 语句向该分区表写入数据：**
+
+```sql
+INSERT INTO TABLE fact_tz PARTITION (day, hour) select 1, '2022-8-8', '14';
+```
+
+**在该 SQL 语句中，用户没有指定分区列的值，这就是一个典型的动态分区写入的例子。**
+
+默认情况下, 如果是动态分区的写入, 在实际写入目标表之前，Flink 将额外对数据按照动态分区列进行排序。 **这就意味着 sink 节点收到的数据都是按分区排序的，即首先收到一个分区的数据，然后收到另一个分区的数据，不同分区的数据不会混在一起。 这样 Hive sink 节点就可以一次只维护一个分区的 writer，否则，Hive sink 需要维护收到的数据对应的所有分区的 writer，如果分区的 writer 过多的话，则可能会导致内存溢出（OutOfMemory）异常。**
+
+为了避免额外的排序，你可以将作业的配置项 `table.exec.hive.sink.sort-by-dynamic-partition.enable`（默认是 `true`）设置为 `false`。 但是这种配置下，如之前所述，**如果单个 sink 节点收到的动态分区数过多的话，则有可能会出现内存溢出的异常。**
+
+**如果数据倾斜不严重的话，你可以在 SQL 语句中添加 `DISTRIBUTED BY <partition_field>` 将相同分区的数据分布到到相同的 sink 节点上来缓解单个 sink 节点的分区 writer 过多的问题。**
+
+此外，你也可以在 SQL 语句中添加 `DISTRIBUTED BY <partition_field>` 来达到将 `table.exec.hive.sink.sort-by-dynamic-partition.enable` 设置为 `false` 的效果。
+
+**注意：**
+
+- 该配置项 `table.exec.hive.sink.sort-by-dynamic-partition.enable` 只在批模式下生效。
+- 目前，只有在 Flink 批模式下使用了 [Hive 方言](https://nightlies.apache.org/flink/flink-docs-master/zh/docs/dev/table/hive-compatibility/hive-dialect/overview/)，才可以使用 `DISTRIBUTED BY` 和 `SORTED BY`。
+
+
+
+
+
+## [Flink--Streaming Warehouse 流式数仓的概念、目标及实现路径](https://www.caogenba.net/t-35666.html)
+
+>**make data warehouse streaming**，就是让整个数仓的数据全实时地流动起来，且是以纯流的方式而不是微批（mini-batch）的方式流动.
+>**目标是实现一个具备端到端实时性的纯流服务（Streaming Service）**，用一套 API 分析所有流动中的数据，当源头数据发生变化，比如捕捉到在线服务的 Log 或数据库的 Binlog 以后，就按照提前定义好的 Query 逻辑或数据处理逻辑，对数据进行分析，分析后的数据落到数仓的某一个分层，再从第一个分层向下一个分层流动，然后数仓所有分层会全部流动起来，最终流到一个在线系统里，用户可以看到整个数仓的全实时流动效果。
+>在这个过程中，**数据是主动的，而查询是被动的**，分析由数据的变化来驱动。同时在垂直方向上，**对每一个数据明细层，用户都可以执行 Query 进行主动查询，并且能实时获得查询结果**。此外，它还能兼容离线分析场景，API 依然是同一套，实现真正的一体化。
+>流式数仓是终态，要达成这个目标，Flink 需要一个配套的流批一体存储支持，为此，Flink 社区提出了新的 **Dynamic Table Storage，即具备流表二象性的存储方案**。
+>
+>什么是Dynamic table
+>
+>**动态表是Flink的Table API和SQL对流数据支持的核心概念，动态表是一个逻辑概念，它有两种不同的物理表示:更改日志和表**
+>
+>- 与静态表相比，动态表的数据会随时间而变化，但可以像静态表一样查询动态表
+>- 查询动态表产生一个连续查询。连续查询永远不会终止，并产生动态结果【另一个动态表】
+>- 查询不断更新其(动态)结果表，以反映其(动态)输入表上的更改
+>- 从本质上讲，对动态表的连续查询与定义物化视图的查询非常相似。
+>
+>高级关系数据库系统提供称为"物化视图"的功能。物化视图定义为SQL查询，就像常规虚拟视图一样。
+>**物化视图缓存查询的结果，使得在访问视图时不需要执行查询**。
+>缓存的一个常见挑战是避免缓存提供过时的结果。物化视图在修改其定义查询的基表时会过时。
+>**Eager View Maintenance**是一种在更新基表后立即更新实例化视图的技术。
+>如果我们考虑以下内容，Eager View Maintenance和流上的SQL查询之间的联系就变得很明显：
+>
+>
+
+## Try Table Store
+
+https://nightlies.apache.org/flink/flink-table-store-docs-master/docs/try-table-store/quick-start/
+
+>
+>
+
 https://ci.apache.org/projects/flink/flink-docs-release-1.11/dev/table/common.html#top
 
  Temporary tables are not dropped if their corresponding database is removed.
@@ -440,6 +916,352 @@ As shown in the example, definitions of table sources, views, and temporal table
 
 ## [阿里flinksql文档](https://help.aliyun.com/document_detail/111864.html?spm=a2c4g.11174283.2.2.45a573d5JNr5qu)
 
+### DDL 
+
+ https://help.aliyun.com/document_detail/62515.html?spm=a2c4g.11186623.0.0.8cee78f0zdolnN
+
+### 创建消息队列Kafka源表
+
+https://help.aliyun.com/document_detail/86824.html
+
+>**从Kafka输出的数据为序列化后的VARBINARY（二进制）格式。对于输出的每条数据，需要您编写自定义表值函数（UDTF）将其解析为序列化前的数据结构。**Kafka 源表数据解析流程通常为：Kafka Source Table -> UDTF -> Realtime Compute for Apache Flink -> Sink。此外，Flink SQL 中也支持通过CAST函数将VARBINARY解析为VARCHAR类型。自定义表值函数请参见[自定义表值函数（UDTF）](https://help.aliyun.com/document_detail/69559.htm#concept-69559-zh)。
+>
+>## Kafka消息解析示例
+>
+>* **场景1：将Kafka中的数据进行计算，并将计算结果输出到RDS。**
+>
+>Kafka 中保存了 JSON 格式数据，需要使用实时计算 Flink 版进行计算，消息格式示例如下。
+>
+>方法1：**Kafka SOURCE->Realtime Compute for Apache Flink->RDS SINK**
+>
+>Blink 2.2.7 及以上版本支持将VARBINARY类型通过CAST函数转换为VARCHAR类型，再通过JSON_VALUE函数对Kafka数据进行解析，示例如下。
+>
+>方法2：**Kafka Source->UDTF->Realtime Compute for Apache Flink->RDS Sink**
+>
+>针对 不规则数据、复杂 JSON 数据，需要您自行编写 UDTF 代码进行解析，示例如下。
+>
+> ```sql
+>-- 定义解析Kafka message的UDTF。
+>CREATE FUNCTION kafkaparser AS 'com.alibaba.kafkaUDTF';
+>
+>-- 定义源表。注意：Kafka源表DDL字段必须与以下示例完全一致。WITH中参数可以修改。
+>CREATE TABLE kafka_src (
+>  messageKey  VARBINARY,
+>  `message`   VARBINARY,
+>  topic       VARCHAR,
+>  `partition` INT,
+>  `offset`    BIGINT
+>) WITH (
+>  type = 'kafka010',    --请参见Kafka版本对应关系。
+>  topic = 'test_kafka_topic',
+>  `group.id` = 'test_kafka_consumer_group',
+>  bootstrap.servers = 'ip1:port1,ip2:port2,ip3:port3'
+>);
+>
+>CREATE TABLE rds_sink (
+>  name       VARCHAR,
+>  age        INT,
+>  grade      VARCHAR,
+>  updateTime TIMESTAMP
+>) WITH(
+>  type='rds',
+>  url='jdbc:mysql://localhost:3306/test',
+>  tableName='test4',
+>  userName='test',
+>  password='<yourDatabasePassword>'
+>);
+>
+>-- 使用UDTF，将二进制数据解析成格式化数据。
+>CREATE VIEW input_view (
+>  name,
+>  age,
+>  grade,
+>  updateTime
+>) AS
+>SELECT
+>  T.name,
+>  T.age,
+>  T.grade,
+>  T.updateTime
+>FROM
+>  kafka_src as S,
+>  LATERAL TABLE (kafkaparser (`message`)) as T (
+>  name,
+>  age,
+>  grade,
+>  updateTime
+>);
+>
+>-- 使用解析出的格式化数据进行计算，并将结果输出到RDS。
+>INSERT INTO rds_sink
+>SELECT 
+>  name,
+>  age,
+>  grade,
+>  updateTime
+>FROM input_view;                                
+> ```
+>
+>场景2：从 Kafka 读取数据，输入实时计算Flink版进行窗口计算。
+>
+>按照实时计算 Flink 版目前的设计，**滚动或滑动等窗口操作，必须在源表DDL上定义[Watermark](https://help.aliyun.com/document_detail/110837.htm#concept-lkg-hsy-bhb)。**Kafka源表比较特殊。如果要以Kafka中message字段中的Event Time进行窗口操作，需要先从message字段使用UDX解析出Event Time，才能定义Watermark。在Kafka源表场景中，需要使用[计算列](https://help.aliyun.com/document_detail/110847.htm#concept-nnx-bwy-bhb)。例如Kafka中写入数据：`2018-11-11 00:00:00|1|Anna|female` 。计算流程为：Kafka Source->UDTF->Realtime Compute for Apache Flink->RDS Sink。
+>
+>- 方法1：Kafka SOURCE->Realtime Compute for Apache Flink->RDS SINK
+>
+>  Blink 2.2.7及以上版本支持将VARBINARY类型通过CAST函数转换为VARCHAR类型，再通过JSON_VALUE函数对Kafka数据进行解析，示例如下。
+>
+>```sql
+>CREATE TABLE kafka_src (
+>  messageKey VARBINARY,
+>  `message` VARBINARY,
+>  topic VARCHAR,
+>  `partition` INT,
+>  `offset` BIGINT,
+>  ts as to_timestamp(json_value(cast(`message` as VARCHAR ),'$.nodes.time')),
+>  WATERMARK wk FOR ts as withOffset(ts, 2000)
+>) WITH (type = 'kafka' --请参见Kafka版本对应关系。
+>);
+>
+>CREATE TABLE rds_sink (
+>  starttime TIMESTAMP ,
+>  endtime   TIMESTAMP ,
+>  `message` BIGINT 
+>) WITH (type = 'rds');
+>
+>INSERT
+>  INTO rds_sink
+>SELECT
+>  TUMBLE_START(ts, INTERVAL '1' MINUTE),
+>  TUMBLE_END(ts, INTERVAL '1' MINUTE),
+>  count(`message`)
+>FROM
+>  kafka_src
+>GROUP BY TUMBLE(ts, INTERVAL '1' MINUTE);
+>```
+>
+>方法2：Kafka SOURCE->UDTF->Realtime Compute for Apache Flink->RDS SINK
+>
+>- SQL
+>
+>```sql
+>-- 定义解析Kafka message的UDTF。
+>CREATE FUNCTION kafkapaser AS 'com.alibaba.kafkaUDTF';
+>CREATE FUNCTION kafkaUDF AS 'com.alibaba.kafkaUDF';
+>
+>-- 定义源表，注意：Kafka源表DDL字段必须与以下示例一模一样。WITH中参数可改。
+>create table kafka_src (
+>  messageKey VARBINARY,
+>  `message` VARBINARY,
+>  topic VARCHAR,
+>  `partition` INT,
+>  `offset` BIGINT,
+>  ctime AS TO_TIMESTAMP(kafkaUDF(`message`)), -- 定义计算列，计算列可理解为占位符，源表中并没有这一列，其中的数据可经过下游计算得出。注意:计算列的类型必须为TIMESTAMP才能创建Watermark。
+>  watermark for `ctime` as withoffset(`ctime`,0) -- 在计算列上定义Watermark。
+>) WITH (
+>  type = 'kafka010', -- 请参见Kafka版本对应关系。
+>  topic = 'test_kafka_topic',
+>  `group.id` = 'test_kafka_consumer_group',
+>  bootstrap.servers = 'ip1:port1,ip2:port2,ip3:port3'
+>);
+>
+>create table rds_sink (
+>  `name` VARCHAR,
+>  age INT,
+>  grade VARCHAR,
+>  updateTime TIMESTAMP
+>) WITH(
+>  type='rds',
+>  url='jdbc:mysql://localhost:3306/test',
+>  tableName='test4',
+>  userName='test',
+>  password='<yourPassword>'
+>);
+>
+>
+>-- 使用UDTF，将二进制数据解析成格式化数据。
+>CREATE VIEW input_view AS
+>SELECT
+>  S.ctime,
+>  T.`order`,
+>  T.`name`,
+>  T.sex
+>  from
+>  kafka_src as S,
+>  LATERAL TABLE (kafkapaser (`message`)) as T (
+>  ctime,
+>  `order`,
+>  `name`,
+>  sex
+>);
+>
+>-- 对input_view中输出的数据做计算。
+>CREATE VIEW view2 (
+>  cnt,
+>  sex
+>) AS
+>  SELECT
+>  COUNT(*) as cnt,
+>  T.sex
+>  from
+>  input_view
+>Group BY sex, TUMBLE(ctime, INTERVAL '1' MINUTE);
+>
+>-- 使用解析出的格式化数据进行计算，并将结果输出到RDS。
+>insert into rds_sink
+>  SELECT
+>  cnt,sex
+>from view2;
+>```
+>
+>* UDTF
+>
+>```java
+>package com.alibaba;
+>
+>import com.alibaba.fastjson.JSONObject;
+>import org.apache.flink.table.functions.TableFunction;
+>import org.apache.flink.table.types.DataType;
+>import org.apache.flink.table.types.DataTypes;
+>import org.apache.flink.types.Row;
+>import java.io.UnsupportedEncodingException;
+>
+>/**
+>  以下例子解析输入Kafka中的JSON字符串，并将其格式化输出。
+>**/
+>public class kafkaUDTF extends TableFunction<Row> {
+>
+>    public void eval(byte[] message) {
+>        try {
+>          // 读入一个二进制数据，并将其转换为String格式。
+>            String msg = new String(message, "UTF-8");
+>
+>                // 提取JSON Object中各字段。
+>                    String ctime = Timestamp.valueOf(data.split('\\|')[0]);
+>                    String order = data.split('\\|')[1];
+>                    String name = data.split('\\|')[2];
+>                    String sex = data.split('\\|')[3];
+>
+>                    // 将解析出的字段放到要输出的Row()对象。
+>                    Row row = new Row(4);
+>                    row.setField(0, ctime);
+>                    row.setField(1, age);
+>                    row.setField(2, grade);
+>                    row.setField(3, updateTime);
+>
+>                    System.out.println("Kafka message str ==>" + row.toString());
+>
+>                    // 输出一行。
+>                    collect(row);
+>
+>            } catch (ClassCastException e) {
+>                System.out.println("Input data format error. Input data " + msg + "is not json string");
+>            }
+>
+>
+>        } catch (UnsupportedEncodingException e) {
+>            e.printStackTrace();
+>        }
+>
+>    }
+>
+>    @Override
+>    // 如果返回值是Row，重新加载UDTF这个方法，并指明系统返回的字段类型。
+>    // 定义输出Row()对象的字段类型。
+>    public DataType getResultType(Object[] arguments, Class[] argTypes) {
+>        return DataTypes.createRowType(DataTypes.TIMESTAMP,DataTypes.STRING, DataTypes.Integer, DataTypes.STRING,DataTypes.STRING);
+>    }
+>
+>}
+>```
+>
+>* UDF
+>
+>```sql
+>package com.alibaba;
+>package com.hjc.test.blink.sql.udx;
+>import org.apache.flink.table.functions.FunctionContext;
+>import org.apache.flink.table.functions.ScalarFunction;
+>
+>public class KafkaUDF extends ScalarFunction {
+>    // 可选，open方法可以不写。
+>    // 需要import org.apache.flink.table.functions.FunctionContext;
+>
+>    public String eval(byte[] message) {
+>
+>         // 读入一个二进制数据，并将其转换为String格式。
+>        String msg = new String(message, "UTF-8");
+>        return msg.split('\\|')[0];
+>    }
+>    public long eval(String b, String c) {
+>        return eval(b) + eval(c);
+>    }
+>    //可选，close方法可以不写。
+>    @Override
+>    public void close() {
+>        }
+>}                                        
+>```
+
+### 创建数据维表
+
+https://help.aliyun.com/document_detail/62531.html
+
+#### 概述
+
+在维表DDL语法中增加1行PERIOD FOR SYSTEM_TIME的声明，定义维表的变化周期，即可使用标准的CREATE TABLE语法定义实时计算维表。
+
+```sql
+CREATE TABLE white_list (
+  id varchar,
+  name varchar,
+  age int,
+  PRIMARY KEY (id),
+  PERIOD FOR SYSTEM_TIME  --定义维表的变化周期。实时计算3.x及以上版本，维表DDL中可以不声明该句，在维表JOIN时，声明FOR SYSTEM_TIME AS OF PROCTIME（）即可。
+) with (
+  type = 'RDS',
+  ...
+);
+```
+
+**说明**
+
+- **维表必须指定主键。**维表JOIN时，ON的条件必须包含所有主键的等值条件。
+- **目前仅支持源表`INNER JOIN`或`LEFT JOIN`维表。**
+- **维表的唯一键（UK）必须为数据库表中的唯一键。**如果维表声明的唯一键不是数据库表的唯一键会产生以下影响：
+  - 维表的读取速度变慢。
+  - 在维表JOIN时，会从第一条数据进行JOIN，在加入Job的过程中，相同KEY的多条记录在数据库中按顺序发生变化，可能导致JOIN结果错误。
+
+**INDEX语法**
+
+实时计算2.2以下版本，维表定义要求声明`PRIMARY KEY`，这种情况下只能实现一对一连接。为支持一对多连接的需求，引入了`INDEX`语法。非`Cache All`的维表JOIN通过`INDEX LOOKUP`的方式实现一对多连接的需求。
+
+```sql
+CREATE TABLE Persons (
+    ID bigint,
+    LastName varchar,
+    FirstName varchar,
+    Nick varchar,
+    Age int,
+    [UNIQUE] INDEX(LastName,FirstName,Nick), --定义INDEX，不需要指定具体的类型，例如，fulltext或clustered等。
+    PERIOD FOR SYSTEM_TIME
+) with (
+  type='RDS',
+  ...
+);
+```
+
+**说明**
+
+- 实时计算2.2.7及以后版本支持`UNIQUE CONSTRAINT`（`UNIQUE KEY`），实时计算2.2.7以下版本可以使用`PRIMARY KEY`的定义。
+- 在生成执行计划时，引擎优先采用`UNIQUE INDEX`。即如果DDL中使用INDEX，但JOIN等值连接条件中同时包含`UNIQUE`和`NON-UNIQUE INDEX`时，优先使用`UNIQUE INDEX`查找右表数据。
+- 支持一对多连接的维表类型，例如RDS和MaxCompute。
+- 您可以增加`maxJoinRows`参数，表示在一对多连接时，左表一条记录连接右表的最大记录数（默认值为1024）。在一对多连接的记录数过多时，可能会极大的影响流任务的性能，因此您需要增大Cache的内存（`cacheSize`限制的是左表key的个数）。
+- 表格存储Tablestore和Hologres维表不支持使用INDEX进行一对多JOIN。
+
+![image-20221013180010564](flink_note.assets/image-20221013180010564.png)
+
+
+
 ## [Jobs and Scheduling](https://ci.apache.org/projects/flink/flink-docs-release-1.12/internals/job_scheduling.html)（重要）
 
 >## JobManager Data Structures
@@ -586,6 +1408,1090 @@ You can configure the number of samples for the job manager with the following c
 >
 
 # 学习
+
+## Flink Batch 分享
+
+https://mp.weixin.qq.com/s/F495juq3spR6EePWcklRYg
+
+https://github.com/flink-extended/flink-remote-shuffle
+
+![image-20221103180852682](flink_note.assets/image-20221103180852682.png)
+
+![image-20221103180924156](flink_note.assets/image-20221103180924156.png)
+
+![image-20221103181036116](flink_note.assets/image-20221103181036116.png)
+
+![image-20221103181058550](flink_note.assets/image-20221103181058550.png)
+
+先 buffer，在根据 partion sort ，再merge：
+
+![image-20221103181209866](flink_note.assets/image-20221103181209866.png)
+
+sort shuffer 其实是针对 partition 排序：
+
+调度器会调度下游的请求，根据下游的所有请求，优化从 merge file 的取数逻辑，尽量减少 IO. 但是 sort shuffer 主要还是想解决 小文件的目的：
+
+### Flink Sort-Shuffle 实现简介
+
+https://mp.weixin.qq.com/s/M5lGOYu0Bwaspa8G0x5NHQ
+
+![image-20221103181402911](flink_note.assets/image-20221103181402911.png)
+
+![image-20221103181444203](flink_note.assets/image-20221103181444203.png)
+
+![image-20221103181544463](flink_note.assets/image-20221103181544463.png)
+
+
+
+![image-20221103181830178](flink_note.assets/image-20221103181830178.png)
+
+根据数据量生成并行度：
+
+![image-20221103181855866](flink_note.assets/image-20221103181855866.png)
+
+![image-20221103182102783](flink_note.assets/image-20221103182102783.png)
+
+1.16 提供预测执行：
+
+![image-20221103182129735](flink_note.assets/image-20221103182129735.png)
+
+![image-20221103185838684](flink_note.assets/image-20221103185838684.png)
+
+![image-20221103182155628](flink_note.assets/image-20221103182155628.png)
+
+![image-20221103182310820](flink_note.assets/image-20221103182310820.png)
+
+
+
+![image-20221103182419285](flink_note.assets/image-20221103182419285.png)
+
+![image-20221103182429801](flink_note.assets/image-20221103182429801.png)
+
+![image-20221103182538314](flink_note.assets/image-20221103182538314.png)
+
+裁剪发生在执行的过程中，而不是之前：
+
+![image-20221103182701926](flink_note.assets/image-20221103182701926.png)
+
+
+
+![image-20221103182815063](flink_note.assets/image-20221103182815063.png)
+
+![image-20221103182844751](flink_note.assets/image-20221103182844751.png)
+
+![image-20221103182936673](flink_note.assets/image-20221103182936673.png)
+
+flinksql 的服务层：
+
+![image-20221103183126694](flink_note.assets/image-20221103183126694.png)
+
+
+
+![image-20221103183554298](flink_note.assets/image-20221103183554298.png)
+
+
+
+## 基于 Flink CDC 打通数据实时入湖
+
+https://developer.aliyun.com/article/990843
+
+>**Iceberg的表格式设计具有如下特点：**
+>
+>- **ACID：**不会读到不完整的commit数据，基于乐观锁实现，支持并发commit，支持Row-level delete，支持upsert操作。
+>- **增量快照：**Commit后的数据即可见，在Flink实时入湖场景下，数据可见根据checkpoint的时间间隔来确定的，增量形式也可回溯历史快照。
+>- **开放的表格式：**对于一个真正的开放表格式，支持多种数据存储格式，如：parquet、orc、avro等，支持多种计算引擎，如：Spark、Flink、Hive、Trino/Presto。
+>- **流批接口支持：**支持流式写入、批量写入，支持流式读取、批量读取。下文的测试中，主要测试了流式写入和批量读取的功能。
+>
+># 03 Flink CDC打通数据实时导入Iceberg实践
+>
+>当前使用Flink最新版本 1.12，支持 CDC 功能和更好的流批一体。**Apache Iceberg最新版本0.11已经支持Flink API方式upsert，**如果使用编写框架代码的方式使用该功能，无异于镜花水月，可望而不可及。**本着SQL就是生产力的初衷，该测试使用最新Iceberg的master分支代码编译尝鲜，并对源码稍做修改，达到支持使用Flink SQL方式upsert。**
+>
+>先来了解一下什么是**Row-Level Delete？该功能是指根据一个条件从一个数据集里面删除指定行。**那么为什么这个功能那么重要呢？众所周知，大数据中的行级删除不同于传统数据库的更新和删除功能，在基于HDFS架构的文件系统上数据存储只支持数据的追加，为了在该构架下支持更新删除功能，**删除操作演变成了一种标记删除，更新操作则是转变为先标记删除、后插入一条新数据。具体实现方式可以分为Copy on Write（COW）模式和Merge on Read（MOR）模式，其中Copy on Write模式可以保证下游的数据读具有最大的性能，而Merge on Read模式保证上游数据插入、更新、和删除的性能，减少传统Copy on Write模式下写放大问题。**
+>
+>**在Apache Iceberg中目前实现的是基于Merge on Read模式实现的Row-Level Delete。在 Iceberg中MOR相关的功能是在Iceberg Table Spec Version 2: Row-level Deletes中进行实现的，V1是没有相关实现的。** 虽然**当前Apache Iceberg 0.11版本不支持Flink SQL方式进行Row-Level Delete，但为了方便测试，通过对源码的修改支持Flink SQL方式。**在不远的未来，Apache Iceberg 0.12版本将会对Row-Level Delete进行性能和稳定性的加强。
+>
+>Flink SQL CDC和Apache Iceberg的架构设计和整合如何巧妙，不能局限于纸上谈兵，下面就实际操作一下，体验其功能的强大和带来的便捷。并且顺便体验一番流批一体，下面的离线查询和实时upsert入湖等均使用Flink SQL完成。
+>
+>**c）结论**
+>
+>- append方式导入速度远大于upsert导入数据速度。在使用的时候，如没有更新数据的场景时，则不需要upsert方式导入数据。
+>- 导入速度随着并行度的增加而增加。
+>- upsert方式数据的插入和更新速度相差不大，主要得益于MOR原因。
+>
+>### 3，数据入湖任务运维
+>
+>**在实际使用过程中，默认配置下是不能够长期稳定的运行的，一个实时数据导入iceberg表的任务，需要通过至少下述四点进行维护，才能使Iceberg表的入湖和查询性能保持稳定。**
+>
+>**a）压缩小文件**
+>
+>**Flink从Kafka消费的数据以checkpoint方式提交到Iceberg表，数据文件使用的是parquet格式，这种格式无法追加，而流式数据又不能等候太长时间，所以会不断commit提交数据产生小文件。目前Iceberg提供了一个批任务action来压缩小文件，需要定期周期性调用进行小文件的压缩功能。****示例代码如下：
+>
+>```java
+>`Table table = ...   
+>Actions.forTable(table)  
+>.rewriteDataFiles()  
+>    .targetSizeInBytes(100 * 1024 * 1024) // 100 MB  
+>    .execute();  
+>`
+>```
+>
+>**b）快照过期处理**
+>
+>iceberg本身的架构设计决定了，对于实时入湖场景，会产生大量的snapshot文件，快照过期策略是通过额外的定时任务周期执行，过期snapshot文件和过期数据文件均会被删除。如果实际使用场景不需要time travel功能，则可以保留较少的snapshot文件。
+>
+>```java
+>`Table table = ...   
+>Actions.forTable(table)  
+>    .expireSnapshots()  
+>.expireOlderThan(System.currentTimeMillis())  
+>.retainLast(5)  
+>    .execute();  
+>`
+>```
+>
+>**c）清理orphan文件**
+>
+>orphan 文件的产生是由于正常或者异常的数据写入但是未提交导致的，长时间积累会产生大量**脱离元数据的孤立数据文件**，所以也需要类似JVM的垃圾回收一样，周期性清理这些文件。该功能不需要频繁运行，**设置为3-5天运行一次即可。**
+>
+>```java
+>`Table table = ...  
+>Actions.forTable(table)  
+>    .removeOrphanFiles()  
+>    .execute();  
+>`
+>```
+>
+>**d）删除元数据文件**
+>
+>- 每次提交 snapshot 均会自动产生一个新的 metadata 文件，实时数据入库会频繁的产生大量metadata文件，需要通过如下配置达到自动删除metadata文件的效果。
+>
+>| Property                                   | Description                                                  |
+>| :----------------------------------------- | :----------------------------------------------------------- |
+>| write.metadata.delete-after-commit.enabled | Whether to delete old metadata files after each table commit |
+>| write.metadata.previous-versions-max       | The number of old metadata files to keep                     |
+>
+>### 4，数据入湖问题讨论
+>
+>这里主要讨论数据一致性和顺序性问题。
+>
+>**Q1:**  程序BUG或者任务重启等导致数据传输中断，如何保证数据的一致性呢？
+>
+>**Answer：**数据一致保证通过两个方面实现，借助Flink实现的exactly once语义和故障恢复能力，实现数据严格一致性。借助Iceberg ACID能力来隔离写入对分析任务的不利影响。
+>
+>**Q2：**数据入湖否可保证全局顺序性插入和更新？
+>
+>**Answer：****不可以全局保证数据生产和数据消费的顺序性，但是可以保证同一条数据的插入和更新的顺序性。**首先数据抽取的时候是单线程的，然后分发到Kafka的各个partition中，此时同一个key的变更数据打入到同一个Kafka的分区里面，Flink读取的时候也能保证顺序性消费每个分区中的数据，进而保证同一个key的插入和更新的顺序性。
+>
+># 04 未来规划
+>
+>新的技术最终是要落地才能发挥其内在价值的，针对在实践应用中面临的纷繁复杂的数据，结合流计算技术Flink、表格式Iceberg，未来落地规划主要集中在两个方面，**一是Iceberg集成到实时计算平台中，解决易用性的问题；二是基于Iceberg，构建准实时数仓进行探索和落地。**
+>
+>### 1，整合Iceberg到实时计算平台
+>
+>目前，我所负责的实时计算平台是一个基于SQL的高性能实时大数据处理平台，该平台彻底规避繁重的底层流计算处理逻辑、繁琐的提交过程等，为用户打造一个**只需关注实时计算逻辑的平台**，助力企业向实时化、智能化大数据转型。
+>
+>![img](flink_note.assets/a6777b1e-9344-4c5f-ab84-b78c36cd7acf.png)
+>
+>**实时计算平台未来将会整合Apache Iceberg数据源，用户可以在界面配置Flink SQL任务，该任务以upsert方式实时解析changlog并导入到数据湖中。并增加小文件监控、定时任务压缩小文件、清理过期数据等功能。**
+>
+>### 2，准实时数仓探索
+>
+>本文对数据实时入湖从原理和实战做了比较多的阐述，在完成**实时数据入湖SQL化**的功能以后，入湖后的数据有哪些场景的使用呢？**下一个目标当然是入湖的数据分析实时化。**比较多的讨论是关于实时数据湖的探索，结合所在企业数据特点探索适合落地的实时数据分析场景成为当务之急。
+>
+>![img](flink_note.assets/e9c42856-ee70-4cfe-853e-b3137f521a22.png)
+>
+>随着数据量的持续增大，和业务对时效性的严苛要求，**基于Apache Flink和Apache Iceberg构建准实时数仓愈发重要和迫切，作为实时数仓的两大核心组件，可以缩短数据导入、方便数据行级变更、支持数据流式读取等。**
+
+
+
+## Flink SQL与Hive的集成
+
+https://developer.aliyun.com/article/926570
+
+简洁清晰, 有详细代码实例.
+
+>
+>
+>
+
+## Flink 1.11 新特性之 SQL Hive Streaming 简单示例
+
+https://www.jianshu.com/p/fb7d29abfa14
+
+简洁清晰， 有详细代码实例
+
+>
+>
+>
+
+## **字节跳动流式数据集成基于Flink Checkpoint两阶段提交的实践和优化**
+
+https://blog.51cto.com/bytedata/5130579
+
+>
+>
+>
+
+## LATERAL JOIN
+
+>### **传统  join 方式**
+>
+>传统的离线 Batch SQL (面向有界数据集的 SQL) 有三种基础的实现方式，分别是 Nested-loop Join、Sort-Merge Join 和 Hash Join。
+>
+>![img](flink_note.assets/1620-6442537.png)
+>
+>1. Nested-loop Join 最为简单直接，**将两个数据集加载到内存，并用内嵌遍历的方式来逐个比较两个数据集内的元素是否符合  Join 条件。**Nested-loop Join 的时间效率以及空间效率都是最低的，可以使用：table.exec.disabled-operators:NestedLoopJoin 来禁用。
+>
+>2. Sort-Merge Join 分为 Sort 和 Merge 两个阶段：**首先将两个数据集进行分别排序，然后再对两个有序数据集分别进行遍历和匹配，类似于归并排序的合并。(Sort-Merge Join 要求对两个数据集进行排序，但是如果两个输入是有序的数据集，则可以作为一种优化方案)。**
+>
+>3. Hash Join 同样分为两个阶段：首先将一个数据集转换为 Hash Table，然后遍历另外一个数据集元素并与 Hash Table 内的元素进行匹配。
+>
+>- 第一阶段和第一个数据集分别称为 build 阶段和 build table；
+>- 第二个阶段和第二个数据集分别称为 probe 阶段和 probe table。
+>
+>**Hash Join 效率较高但是对空间要求较大，通常是作为 Join 其中一个表为适合放入内存的小表的情况下的优化方案 (并不是不允许溢写磁盘)。**
+>
+>注意：Sort-Merge Join 和 Hash Join 只适用于 Equi-Join ( Join 条件均使用等于作为比较算子)。
+>
+>**Flink SQL 流批一体的核心是：流表二象性。**围绕这一核心有若干概念，例如，动态表（Dynamic Table）/时态表（Temporal Table）、版本（Version）、版本表（Version Table）、普通表、连续查询、物化视图/虚拟视图、CDC（Change Data Capture）、Changelog Stream。
+>
+>![image-20221022204529919](flink_note.assets/image-20221022204529919.png)
+>
+>1. **将流转换为动态表。**
+>2. **在动态表上计算一个连续查询，生成一个新的动态表。**
+>3. **生成的动态表被转换回流。**
+>
+>理解：流和表只是数据在特定场景下的两种形态（联想到光的波粒二象性？笔者已经傻傻分不清）
+>
+>**temporal join**
+>
+>Flink Join 主要包含：
+>
+>- **Event Time Temporal Join**
+>- **Processing Time Temporal Join**
+>
+>```sql
+>SELECT [column_list]
+>FROM table1 [AS <alias1>]
+>[LEFT] JOIN table2 FOR SYSTEM_TIME AS OF table1.{ proctime | rowtime } [AS <alias2>]
+>ON table1.column-name1 = table2.column-name1
+>```
+>
+>其中，
+>
+>- 左表：任意表（探针侧，probe site）
+>- 右表：版本表（versioned table）/普通表（构建侧，build side）
+>
+>本文主要探索Event Time temporal join的一些设计特性，即右侧是版本表的join。
+>
+>**Event Time Temporal Join**
+>
+>一个典型的场景是订单和汇率，下方示例展示了一个append-only 订单表`Orders` 与一个不断改变的汇率表 `RatesHistory` 的 Join 操作：
+>
+>```sql
+>SELECT * FROM Orders;
+>
+>rowtime amount currency
+>======= ====== =========
+>10:15        2 Euro
+>10:30        1 US Dollar
+>10:32       50 Yen
+>10:52        3 Euro
+>11:04        5 US Dollar
+>```
+>
+>`RatesHistory` 表示不断变化的汇率信息。汇率以日元为基准（即 `Yen` 永远为 1）。
+>
+>```sql
+>SELECT * FROM RatesHistory;
+>
+>rowtime currency   rate
+>======= ======== ======
+>09:00   US Dollar   102
+>09:00   Euro        114
+>09:00   Yen           1
+>10:45   Euro        116
+>11:15   Euro        119
+>11:49   Pounds      108
+>```
+>
+>基于上述信息，欲计算 Orders 表中所有交易量并全部转换成日元。
+>
+>例如，`09:00` 到 `10:45` 间欧元对日元的汇率是 `114`，`10:45` 到 `11:15` 间为 `116，10:45` `以后是119。如果要将10：52的这笔订单进行汇率转换，最终选择 10：45这个版本，`
+>
+>```sql
+>create table left_upsert (
+>    id string,
+>    op_ts timestamp(3),
+>    primary key(id) not enforced,
+>    watermark for op_ts as op_ts - intervcal '0' second
+>) with (
+>    'connector' = 'upsert-kafka',
+>    'properties.bootstrap.servers' = '...',
+>    'topic' = '...'
+>    'key.format' = 'json',
+>    'value.format' = 'json',
+>    'properties.group.id' = '...'
+>)
+>```
+>
+>```sql
+>create table right_upsert (
+>    id string,
+>    op_ts timestamp(3),
+>    primary key(id) not enforced,
+>    watermark for op_ts as op_ts - intervcal '0' second
+>) with (
+>    'connector' = 'upsert-kafka',
+>    'properties.bootstrap.servers' = '...',
+>    'topic' = '...'
+>    'key.format' = 'json',
+>    'value.format' = 'json',
+>    'properties.group.id' = '...'
+>)
+>```
+>
+>
+>
+>**1. 支持inner join, left join**
+>
+>**2. 右流版本表既要定义为事件时间（水位线）也要定义主键；左流需要定义为事件时间（水位线）。**
+>
+>其实，版本表的特点是可以追溯历史版本，所以，时间和主键是必须要同时具备的。
+>
+>**3. 关联等式条件必须有维表的主键，但是可以加入其它辅助条件，例如，**
+>
+>**5. 左流元素才会触发join的作用，join的结果只会看到从左流探针侧触发的join。**
+>
+>**这也说明了右流是不会触发join结果的更新的。**
+>
+>**总结**
+>
+>- **支持inner join, left join。**
+>- **右流版本表既要定义为事件时间（水位线）也要定义主键；左流需要定义为事件时间（水位线）。**
+>- **关联等式条件必须有维表的主键，但是可以加入其它辅助条件。**
+>- **水位线起到一个触发写出的作用，在写出之前，左右流的元素在缓存中join。**
+>- **左流元素才会触发join的作用，join的结果只会看到从左流探针侧触发的join。**
+>- **在缓存中的join结果没有merge，而是将每次触发join的结果依次输出。**
+>- **当触发写出后，在缓存中只保留元素最新版本，过期版本将删除。**
+>
+>**以上，可以看出Event Time Temporal Join的适用场景比较特殊，因为构建侧的维表的数据流必须是【缓慢变化维】，否则无法确join的合适的时间版本，并且水位线无法推进。**
+>
+>
+
+## flink sql 知其所以然（一）| source\sink 原理
+
+https://www.bilibili.com/read/cv12681921/
+
+>Notes：在 flink sql 中，source 有两种表，**一种是数据源表，一种是数据维表。数据源表就是有源源不断的数据的表。比如 mq。数据维表就是用来给某些数据扩充维度使用的。比如 redis，mysql，一般都是做扩容维度的维表 join 使用。**
+>
+>5.原理剖析篇-sql source、sink 是怎么跑起来的 
+>
+>![image-20221015211655149](flink_note.assets/image-20221015211655149.png)
+>
+>sql source connector：用户指定了 connector = kafka，flink 是怎么自动映射到 FlinkKafkaConsumer 的？
+>
+>sql source format：用户指定了 format = json，字段信息，flink 是怎么自动映射到 JsonRowDataDeserializationSchema，以及字段解析的？
+>
+>sql source properties：flink 是怎么自动将配置加载到 FlinkKafkaConsumer 中的？
+>
+>
+
+## **Flink集成Hive之Hive Catalog与Hive Dialect**
+
+https://blog.51cto.com/u_14222592/2892963
+
+## Flink SQL之Catalogs
+
+https://developer.aliyun.com/article/926528
+
+>## 1）Catalogs 主要定义
+>
+>Catalog 提供了 **元数据信息**，例如**数据库、表、分区、视图以及数据库或其他外部系统中存储的函数和信息。**
+>
+>**元数据可以是临时的，例如临时表、或者通过TableEnvironment注册的UDF，也可以是持久化的，例如Hive Metastore中的元数据。**
+>
+>**Catalog 提供了一个统一的API，用于管理元数据，并使其可以从Table API和 SQL查询语句中来访问。**
+>
+>## （2）Catalogs类型
+>
+>* **GenericInMemoryCatalog**
+>
+>GenericInMemoryCatalog 是基于内存实现的 Catalog，所有元数据只在 session 的生命周期内可用。
+>
+>* **JdbcCatalog**
+>
+>JdbcCatalog 使得用户可以将 Flink 通过 JDBC 协议连接到关系数据库。**PostgresCatalog 是当前实现的唯一一种 JDBC Catalog。**
+>
+>* **HiveCatalog**
+>
+>HiveCatalog 有两个用途：**作为原生 Flink 元数据的持久化存储，以及作为读写现有 Hive 元数据的接口。**
+>
+>**警告 Hive Metastore 以小写形式存储所有元数据对象名称。而 GenericInMemoryCatalog 区分大小写。**
+>
+>## （3）Catalogs在Flink SQL架构中的位置
+>
+>![image-20221012151814873](flink_note.assets/image-20221012151814873.png)
+>
+>## （4）Catalogs 操作
+>
+>使用 SQL DDL
+>
+>```java
+>TableEnvironment tableEnv = ...
+>
+>// Create a HiveCatalog 
+>Catalog catalog = new HiveCatalog("myhive", null, "<path_of_hive_conf>");
+>
+>// Register the catalog
+>tableEnv.registerCatalog("myhive", catalog);
+>
+>// Create a catalog database
+>tableEnv.executeSql("CREATE DATABASE mydb WITH (...)");
+>
+>// Create a catalog table
+>tableEnv.executeSql("CREATE TABLE mytable (name STRING, age INT) WITH (...)");
+>
+>tableEnv.listTables(); // should return the tables in current catalog and database.
+>```
+>
+>**数据库操作**
+>
+>```java
+>// create database
+>catalog.createDatabase("mydb", new CatalogDatabaseImpl(...), false);
+>
+>// drop database
+>catalog.dropDatabase("mydb", false);
+>
+>// alter database
+>catalog.alterDatabase("mydb", new CatalogDatabaseImpl(...), false);
+>
+>// get databse
+>catalog.getDatabase("mydb");
+>
+>// check if a database exist
+>catalog.databaseExists("mydb");
+>
+>// list databases in a catalog
+>catalog.listDatabases("mycatalog");
+>```
+>
+>**表操作**
+>
+>```java
+>// create table
+>catalog.createTable(new ObjectPath("mydb", "mytable"), new CatalogTableImpl(...), false);
+>
+>// drop table
+>catalog.dropTable(new ObjectPath("mydb", "mytable"), false);
+>
+>// alter table
+>catalog.alterTable(new ObjectPath("mydb", "mytable"), new CatalogTableImpl(...), false);
+>
+>// rename table
+>catalog.renameTable(new ObjectPath("mydb", "mytable"), "my_new_table");
+>
+>// get table
+>catalog.getTable("mytable");
+>
+>// check if a table exist or not
+>catalog.tableExists("mytable");
+>
+>// list tables in a database
+>catalog.listTables("mydb");
+>```
+>
+>
+
+
+
+## **Flink教程（16）- Flink Table与SQL**
+
+https://blog.51cto.com/u_15294985/5225355#font_colorpurple22_Table_API__SQL_font_31
+
+>
+>
+
+## Apache Flink 漫谈系列(10) - JOIN LATERAL
+
+https://www.51cto.com/article/587866.html
+
+>**2. 用 Correlated subquery解决**
+>
+>Correlated subquery 是在subquery中使用关联表的字段，subquery可以在FROM Clause中也可以在WHERE Clause中。
+>
+>- WHERE Clause
+>
+>用WHERE Clause实现上面的查询需求，SQL如下：
+>
+>```SQL
+>SELECT 
+>c.customerid, c.city 
+>FROM Customers c WHERE c.customerid IN ( 
+>SELECT 
+>o.customerid, o.orderid 
+>FROM Orders o 
+>WHERE o.customerid = c.customerid 
+>) 
+>```
+>
+>执行情况：
+>
+>![image-20221013163210789](flink_note.assets/image-20221013163210789.png)
+>
+>上面的问题是用在 WHERE Clause 里面 subquery 的查询列必须和需要比较的列对应，否则我们无法对 o.orderid 进行投影, 上面查询我为什么要加一个 o.orderid 呢，因为查询需求是需要o.orderid的，去掉o.orderid查询能成功，但是拿到的结果并不是我们想要的，如下：
+>
+>```sql
+>SELECT 
+>c.customerid, c.city 
+>FROM Customers c WHERE c.customerid IN ( 
+>SELECT 
+>o.customerid 
+>FROM Orders o 
+>WHERE o.customerid = c.customerid 
+>) 
+>```
+>
+>![image-20221013163403194](flink_note.assets/image-20221013163403194.png)
+>
+>可见上面查询结果缺少了o.orderid,不能满足我们的查询需求。
+>
+>- FROM Clause
+>
+>用WHERE Clause实现上面的查询需求，SQL如下：
+>
+>```sql
+>SELECT 
+>c.customerid, c.city, o.orderid 
+>FROM Customers c, ( 
+>SELECT 
+>o.orderid, o.customerid 
+>FROM Orders o 
+>WHERE o.customerid = c.customerid 
+>) as o 
+>```
+>
+>![image-20221013163442006](flink_note.assets/image-20221013163442006.png)
+>
+>错误信息提示我们无法识别c.customerid。在ANSI-SQL里面FROM Clause里面的subquery是无法引用左边表信息的，所以简单的用FROM Clause里面的subquery，也无法解决上面的问题，
+>
+>那么上面的查询需求除了INNER JOIN 我们还可以如何解决呢?
+>
+>**三、JOIN LATERAL**
+>
+>我们分析上面的需求，本质上是根据左表Customers的customerid，去查询右表的Orders信息，就像一个For循环一样，外层是遍历左表Customers所有数据，内层是根据左表Customers的每一个Customerid去右表Orders中进行遍历查询，然后再将符合条件的左右表数据进行JOIN，这种根据左表逐条数据动态生成右表进行JOIN的语义，SQL标准里面提出了LATERAL关键字，也叫做 lateral drive table。
+>
+>**1. CROSS APPLY和LATERAL**
+>
+>上面的示例我们用的是SQL Server进行测试的，这里在多提一下在SQL Server里面是如何支持 LATERAL 的呢?SQL Server是用自己的方言 CROSS APPLY 来支持的。那么为啥不用ANSI-SQL的LATERAL而用CROSS APPLY呢? 可能的原因是当时SQL Server为了解决TVF问题而引入的，同时LATERAL是SQL2003引入的，而CROSS APPLY是SQL Server 2005就支持了，SQL Server 2005的开发是在2000年就进行了，这个可能也有个时间差，等LATERAL出来的时候，CROSS APPLY在SQL Server里面已经开发完成了。所以种种原因SQL Server里面就采用了CROSS APPLY，但CROSS APPLY的语义与LATERAL却完全一致，同时后续支持LATERAL的Oracle12和PostgreSQL94同时支持了LATERAL和CROSS APPLY。
+>
+>**四、JOIN LATERAL 与 INNER JOIN 关系**
+>
+>上面的查询需求并没有体现JOIN LATERAL和INNER JOIN的区别，我们还是以SQL Server中两个查询执行Plan来观察一下：
+>
+>
+>
+>**2. 功能方面**
+>
+>在功能方面INNER JOIN本身在ANSI-SQL中是不允许 JOIN 一个Function的，这也是SQL Server当时引入CROSS APPLY的根本原因。
+>
+>**五、Apache Flink对 LATERAL的支持**
+>
+>前面我花费了大量的章节来向大家介绍ANSI-SQL和传统数据库以SQL Server为例如何支持LATERAL的，接下来我们看看Apache Flink对LATERAL的支持情况。
+>
+>**1. Calcite**
+>
+>Apache Flink 利用 **Calcite进行SQL的解析和优化，目前Calcite完全支持LATERAL语法，**示例如下：
+>
+>```sql
+>SELECT 
+>e.NAME, e.DEPTNO, d.NAME 
+>FROM EMPS e, LATERAL ( 
+>SELECT 
+>* 
+>FORM DEPTS d 
+>WHERE e.DEPTNO=d.DEPTNO 
+>) as d; 
+>```
+>
+>
+>
+>**2. Flink**
+>
+>截止到Flink-1.6.2，Apache Flink 中有两种场景使用LATERAL，如下：
+>
+>- UDTF(TVF) - User-defined Table Funciton
+>- Temporal Table - 涉及内容会在后续篇章单独介绍。
+>
+>本篇我们以在TVF(UDTF)为例说明 Apache Fink中如何支持LATERAL。
+>
+>**(1) UDTF**
+>
+>UDTF- User-defined Table Function是Apache Flink中三大用户自定义函数(UDF，UDTF，UDAGG)之一。 自定义接口如下：
+>
+>```scala
+>val SQLQuery = "SELECT data, name, age FROM userTab, LATERAL TABLE(splitTVF(data)) AS T(name, age)" 
+>```
+>
+>
+
+## [Flink重点难点：维表关联理论和Join实战](https://mp.weixin.qq.com/s?__biz=MzU3MzgwNTU2Mg==&mid=2247506103&idx=1&sn=91b463964544a16aae3693ac54214a36&chksm=fd3e9e22ca4917349684e5b04e6cacf6ec4314a9b44726d809587250d00dd9b46acbb8b5a126&scene=21#wechat_redirect)
+
+>**基于间隔的 Join 和 基于窗口的 Join**
+>
+>如果Flink内置的Join算子无法表达所需的Join语义，那么你可以通过CoProcessFunction、BroadcastProcessFunction或KeyedBroadcastProcessFunction实现自定义的Join逻辑。
+>
+>注意，你要设计的Join算子需要具备高效的状态访问模式及有效的状态清理策略。
+>
+>对划分窗口后的数据流进行Join可能会产生意想不到的语义。例如，假设你为执行Join操作的算子配置了1小时的滚动窗口，那么一旦来自两个输入的元素没有被划分到同一窗口，它们就无法Join在一起，即使二者彼此仅相差1秒钟。
+>
+>**Flink 维表join实践**
+>
+>常见的维表Join方式有四种：
+>
+>- 预加载维表
+>- 热存储维表
+>- 广播维表
+>- Temporal table function join
+>
+>**1.预加载维表**
+>
+>通过定义一个类实现 RichMapFunction，在open()中读取维表数据加载到内存中，在probe流map()方法中与维表数据进行关联。RichMapFunction中open方法里加载维表数据到内存的方式特点如下：
+>
+>> 优点：实现简单. 缺点：因为数据存于内存，所以只适合小数据量并且维表数据更新频率不高的情况下。虽然可以在open中定义一个定时器定时更新维表，但是还是存在维表更新不及时的情况。
+>
+>#### 2、 热存储维表
+>
+>这种方式是将维表数据存储在Redis、HBase、MySQL等外部存储中，实时流在关联维表数据的时候实时去外部存储中查询，这种方式特点如下：
+>
+>> 优点：维度数据量不受内存限制，可以存储很大的数据量。缺点：因为维表数据在外部存储中，读取速度受制于外部存储的读取速度；另外维表的同步也有延迟。
+>
+>优化：
+>
+>(1) 使用 cache 来减轻访问压力
+>
+>可以使用缓存来存储一部分常访问的维表数据，以减少访问外部系统的次数，比如使用guava Cache。
+>
+>（2）**使用异步 IO 来提高访问吞吐量**  (重点关注下)
+>
+>Flink 与外部存储系统进行读写操作的时候可以使用同步方式，也就是发送一个请求后等待外部系统响应，然后再发送第二个读写请求，这样的方式吞吐量比较低，可以用提高并行度的方式来提高吞吐量，但是并行度多了也就导致了进程数量多了，占用了大量的资源。
+>
+>Flink 中可以使用异步IO来读写外部系统，这要求外部系统客户端支持异步IO，不过目前很多系统都支持异步IO客户端。但是如果使用异步就要涉及到三个问题：
+>
+>- 超时：如果查询超时那么就认为是读写失败，需要按失败处理；
+>- 并发数量：如果并发数量太多，就要触发Flink的反压机制来抑制上游的写入;
+>- 返回顺序错乱：顺序错乱了要根据实际情况来处理，Flink支持两种方式：允许乱序、保证顺序。
+>
+>```java
+>package join;
+>
+>import org.apache.flink.api.common.typeinfo.TypeHint;
+>import org.apache.flink.api.java.tuple.Tuple2;
+>import org.apache.flink.api.java.tuple.Tuple3;
+>import org.apache.flink.configuration.Configuration;
+>import org.apache.flink.streaming.api.datastream.AsyncDataStream;
+>import org.apache.flink.streaming.api.datastream.DataStream;
+>import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+>import org.apache.flink.streaming.api.functions.async.ResultFuture;
+>import org.apache.flink.streaming.api.functions.async.RichAsyncFunction;
+>import java.sql.DriverManager;
+>import java.sql.PreparedStatement;
+>import java.sql.ResultSet;
+>import java.util.ArrayList;
+>import java.util.List;
+>import java.util.concurrent.TimeUnit;
+>
+>public class JoinDemo3 {
+>    public static void main(String[] args) throws Exception {
+>
+>        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+>        DataStream<Tuple2<String, Integer>> textStream = env.socketTextStream("localhost", 9000, "\n")
+>                .map(p -> {
+>                    //输入格式为：user,1000,分别是用户名称和城市编号
+>                    String[] list = p.split(",");
+>                    return new Tuple2<String, Integer>(list[0], Integer.valueOf(list[1]));
+>                })
+>                .returns(new TypeHint<Tuple2<String, Integer>>() {
+>                });
+>
+>
+>        DataStream<Tuple3<String,Integer, String>> orderedResult = AsyncDataStream
+>                //保证顺序：异步返回的结果保证顺序，超时时间1秒，最大容量2，超出容量触发反压
+>                .orderedWait(textStream, new JoinDemo3AyncFunction(), 1000L, TimeUnit.MILLISECONDS, 2)
+>                .setParallelism(1);
+>
+>        DataStream<Tuple3<String,Integer, String>> unorderedResult = AsyncDataStream
+>                //允许乱序：异步返回的结果允许乱序，超时时间1秒，最大容量2，超出容量触发反压
+>                .unorderedWait(textStream, new JoinDemo3AyncFunction(), 1000L, TimeUnit.MILLISECONDS, 2)
+>                .setParallelism(1);
+>
+>        orderedResult.print();
+>        unorderedResult.print();
+>        env.execute("joinDemo");
+>    }
+>
+>    //定义个类，继承RichAsyncFunction，实现异步查询存储在mysql里的维表
+>    //输入用户名、城市ID，返回 Tuple3<用户名、城市ID，城市名称>
+>    static class JoinDemo3AyncFunction extends RichAsyncFunction<Tuple2<String, Integer>, Tuple3<String, Integer, String>> {
+>        // 链接
+>        private static String jdbcUrl = "jdbc:mysql://192.168.145.1:3306?useSSL=false";
+>        private static String username = "root";
+>        private static String password = "123";
+>        private static String driverName = "com.mysql.jdbc.Driver";
+>        java.sql.Connection conn;
+>        PreparedStatement ps;
+>
+>        @Override
+>        public void open(Configuration parameters) throws Exception {
+>            super.open(parameters);
+>
+>            Class.forName(driverName);
+>            conn = DriverManager.getConnection(jdbcUrl, username, password);
+>            ps = conn.prepareStatement("select city_name from tmp.city_info where id = ?");
+>        }
+>
+>        @Override
+>        public void close() throws Exception {
+>            super.close();
+>            conn.close();
+>        }
+>
+>        //异步查询方法
+>        @Override
+>        public void asyncInvoke(Tuple2<String, Integer> input, ResultFuture<Tuple3<String,Integer, String>> resultFuture) throws Exception {
+>            // 使用 city id 查询
+>            ps.setInt(1, input.f1);
+>            ResultSet rs = ps.executeQuery();
+>            String cityName = null;
+>            if (rs.next()) {
+>                cityName = rs.getString(1);
+>            }
+>            List list = new ArrayList<Tuple2<Integer, String>>();
+>            list.add(new Tuple3<>(input.f0,input.f1, cityName));
+>            resultFuture.complete(list);
+>        }
+>
+>        //超时处理
+>        @Override
+>        public void timeout(Tuple2<String, Integer> input, ResultFuture<Tuple3<String,Integer, String>> resultFuture) throws Exception {
+>            List list = new ArrayList<Tuple2<Integer, String>>();
+>            list.add(new Tuple3<>(input.f0,input.f1, ""));
+>            resultFuture.complete(list);
+>        }
+>    }
+>}
+>```
+>
+>#### [3、 广播维表](http://mp.weixin.qq.com/s?__biz=MzU3MzgwNTU2Mg==&mid=2247486949&idx=1&sn=53f0e2a9430eea35ee54ca5f18ac49c5&chksm=fd3d4b70ca4ac26640a489aabec93cb331fec0782c9a7360d823ee81c405a1da97334407d3b0&scene=21#wechat_redirect)
+>
+>利用 Flink 的 Broadcast State 将维度数据流广播到下游做join操作。特点如下：
+>
+>> 优点：维度数据变更后可以即时更新到结果中。缺点：**数据保存在内存中，支持的维度数据量比较小。**
+>
+>```java
+>package join;
+>
+>import org.apache.flink.api.common.functions.RichMapFunction;
+>import org.apache.flink.api.common.state.BroadcastState;
+>import org.apache.flink.api.common.state.MapStateDescriptor;
+>import org.apache.flink.api.common.state.ReadOnlyBroadcastState;
+>import org.apache.flink.api.common.typeinfo.TypeHint;
+>import org.apache.flink.api.java.tuple.Tuple2;
+>import org.apache.flink.api.java.tuple.Tuple3;
+>import org.apache.flink.configuration.Configuration;
+>import org.apache.flink.streaming.api.datastream.BroadcastStream;
+>import org.apache.flink.streaming.api.datastream.DataStream;
+>import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+>import org.apache.flink.streaming.api.functions.co.BroadcastProcessFunction;
+>import org.apache.flink.util.Collector;
+>
+>import java.util.ArrayList;
+>import java.util.HashMap;
+>import java.util.List;
+>import java.util.Map;
+>
+>/**
+> * 这个例子是从socket中读取的流，数据为用户名称和城市id，维表是城市id、城市名称，
+> * 主流和维表关联，得到用户名称、城市id、城市名称
+> * 这个例子采用 Flink 广播流的方式来做为维度
+> **/
+>public class JoinDemo4 {
+>
+>    public static void main(String[] args) throws Exception {
+>        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+>        //定义主流
+>        DataStream<Tuple2<String, Integer>> textStream = env.socketTextStream("localhost", 9000, "\n")
+>                .map(p -> {
+>                    //输入格式为：user,1000,分别是用户名称和城市编号
+>                    String[] list = p.split(",");
+>                    return new Tuple2<String, Integer>(list[0], Integer.valueOf(list[1]));
+>                })
+>                .returns(new TypeHint<Tuple2<String, Integer>>() {
+>                });
+>
+>        //定义城市流
+>        DataStream<Tuple2<Integer, String>> cityStream = env.socketTextStream("localhost", 9001, "\n")
+>                .map(p -> {
+>                    //输入格式为：城市ID,城市名称
+>                    String[] list = p.split(",");
+>                    return new Tuple2<Integer, String>(Integer.valueOf(list[0]), list[1]);
+>                })
+>                .returns(new TypeHint<Tuple2<Integer, String>>() {
+>                });
+>
+>        //将城市流定义为广播流
+>        final MapStateDescriptor<Integer, String> broadcastDesc = new MapStateDescriptor("broad1", Integer.class, String.class);
+>        BroadcastStream<Tuple2<Integer, String>> broadcastStream = cityStream.broadcast(broadcastDesc);
+>
+>        DataStream result = textStream.connect(broadcastStream)
+>                .process(new BroadcastProcessFunction<Tuple2<String, Integer>, Tuple2<Integer, String>, Tuple3<String, Integer, String>>() {
+>                    //处理非广播流，关联维度
+>                    @Override
+>                    public void processElement(Tuple2<String, Integer> value, ReadOnlyContext ctx, Collector<Tuple3<String, Integer, String>> out) throws Exception {
+>                        ReadOnlyBroadcastState<Integer, String> state = ctx.getBroadcastState(broadcastDesc);
+>                        String cityName = "";
+>                        if (state.contains(value.f1)) {
+>                            cityName = state.get(value.f1);
+>                        }
+>                        out.collect(new Tuple3<>(value.f0, value.f1, cityName));
+>                    }
+>
+>                    @Override
+>                    public void processBroadcastElement(Tuple2<Integer, String> value, Context ctx, Collector<Tuple3<String, Integer, String>> out) throws Exception {
+>                        System.out.println("收到广播数据：" + value);
+>                        ctx.getBroadcastState(broadcastDesc).put(value.f0, value.f1);
+>                    }
+>                });
+>
+>
+>        result.print();
+>        env.execute("joinDemo");
+>    }
+>}
+>```
+>
+>#### [4、 Temporal table function join](http://mp.weixin.qq.com/s?__biz=MzU3MzgwNTU2Mg==&mid=2247486949&idx=1&sn=53f0e2a9430eea35ee54ca5f18ac49c5&chksm=fd3d4b70ca4ac26640a489aabec93cb331fec0782c9a7360d823ee81c405a1da97334407d3b0&scene=21#wechat_redirect)
+>
+>Temporal table是持续变化表上某一时刻的视图，Temporal table function是一个表函数，传递一个时间参数，返回Temporal table这一指定时刻的视图。
+>
+>可以将维度数据流映射为Temporal table，主流与这个Temporal table进行关联，可以关联到某一个版本（历史上某一个时刻）的维度数据。
+>
+>Temporal table function join的特点如下：
+>
+>> 优点：维度数据量可以很大，维度数据更新及时，不依赖外部存储，可以关联不同版本的维度数据。缺点：只支持在Flink SQL API中使用。
+>
+>```java
+>package join;
+>
+>import org.apache.flink.api.common.typeinfo.TypeHint;
+>import org.apache.flink.api.java.tuple.Tuple2;
+>import org.apache.flink.streaming.api.datastream.DataStream;
+>import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+>import org.apache.flink.table.api.EnvironmentSettings;
+>import org.apache.flink.table.api.Table;
+>import org.apache.flink.table.api.java.StreamTableEnvironment;
+>import org.apache.flink.table.functions.TemporalTableFunction;
+>import org.apache.flink.types.Row;
+>
+>public class JoinDemo5 {
+>    public static void main(String[] args) throws Exception {
+>        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+>        EnvironmentSettings bsSettings = EnvironmentSettings.newInstance().useBlinkPlanner().inStreamingMode().build();
+>        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, bsSettings);
+>
+>        //定义主流
+>        DataStream<Tuple2<String, Integer>> textStream = env.socketTextStream("localhost", 9000, "\n")
+>                .map(p -> {
+>                    //输入格式为：user,1000,分别是用户名称和城市编号
+>                    String[] list = p.split(",");
+>                    return new Tuple2<String, Integer>(list[0], Integer.valueOf(list[1]));
+>                })
+>                .returns(new TypeHint<Tuple2<String, Integer>>() {
+>                });
+>
+>        //定义城市流
+>        DataStream<Tuple2<Integer, String>> cityStream = env.socketTextStream("localhost", 9001, "\n")
+>                .map(p -> {
+>                    //输入格式为：城市ID,城市名称
+>                    String[] list = p.split(",");
+>                    return new Tuple2<Integer, String>(Integer.valueOf(list[0]), list[1]);
+>                })
+>                .returns(new TypeHint<Tuple2<Integer, String>>() {
+>                });
+>
+>        //转变为Table
+>        Table userTable = tableEnv.fromDataStream(textStream, "user_name,city_id,ps.proctime");
+>        Table cityTable = tableEnv.fromDataStream(cityStream, "city_id,city_name,ps.proctime");
+>
+>        //定义一个TemporalTableFunction
+>        TemporalTableFunction dimCity = cityTable.createTemporalTableFunction("ps", "city_id");
+>        //注册表函数
+>        tableEnv.registerFunction("dimCity", dimCity);
+>
+>        //关联查询
+>        Table result = tableEnv
+>                .sqlQuery("select u.user_name,u.city_id,d.city_name from " + userTable + " as u " +
+>                        ", Lateral table (dimCity(u.ps)) d " +
+>                        "where u.city_id=d.city_id");
+>
+>        //打印输出
+>        DataStream resultDs = tableEnv.toAppendStream(result, Row.class);
+>        resultDs.print();
+>        env.execute("joinDemo");
+>    }
+>}
+>```
+>
+>```java
+>package join;
+>
+>import org.apache.flink.api.java.tuple.Tuple3;
+>import org.apache.flink.streaming.api.TimeCharacteristic;
+>import org.apache.flink.streaming.api.datastream.DataStream;
+>import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+>import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
+>import org.apache.flink.streaming.api.windowing.time.Time;
+>import org.apache.flink.table.api.EnvironmentSettings;
+>import org.apache.flink.table.api.Table;
+>import org.apache.flink.table.api.java.StreamTableEnvironment;
+>import org.apache.flink.table.functions.TemporalTableFunction;
+>import org.apache.flink.types.Row;
+>
+>import java.sql.Timestamp;
+>import java.util.ArrayList;
+>import java.util.List;
+>
+>public class JoinDemo9 {
+>    public static void main(String[] args) throws Exception {
+>        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+>        //指定是EventTime
+>        env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+>        EnvironmentSettings bsSettings = EnvironmentSettings.newInstance().useBlinkPlanner().inStreamingMode().build();
+>        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, bsSettings);
+>        env.setParallelism(1);
+>
+>        //主流，用户流, 格式为：user_name、city_id、ts
+>        List<Tuple3<String, Integer, Long>> list1 = new ArrayList<>();
+>        list1.add(new Tuple3<>("user1", 1001, 1L));
+>        list1.add(new Tuple3<>("user1", 1001, 10L));
+>        list1.add(new Tuple3<>("user2", 1002, 2L));
+>        list1.add(new Tuple3<>("user2", 1002, 15L));
+>        DataStream<Tuple3<String, Integer, Long>> textStream = env.fromCollection(list1)
+>                .assignTimestampsAndWatermarks(
+>                        //指定水位线、时间戳
+>                        new BoundedOutOfOrdernessTimestampExtractor<Tuple3<String, Integer, Long>>(Time.seconds(10)) {
+>                            @Override
+>                            public long extractTimestamp(Tuple3<String, Integer, Long> element) {
+>                                return element.f2;
+>                            }
+>                        }
+>                );
+>
+>        //定义城市流,格式为：city_id、city_name、ts
+>        List<Tuple3<Integer, String, Long>> list2 = new ArrayList<>();
+>        list2.add(new Tuple3<>(1001, "beijing", 1L));
+>        list2.add(new Tuple3<>(1001, "beijing2", 10L));
+>        list2.add(new Tuple3<>(1002, "shanghai", 1L));
+>        list2.add(new Tuple3<>(1002, "shanghai2", 5L));
+>
+>        DataStream<Tuple3<Integer, String, Long>> cityStream = env.fromCollection(list2)
+>                .assignTimestampsAndWatermarks(
+>                        //指定水位线、时间戳
+>                        new BoundedOutOfOrdernessTimestampExtractor<Tuple3<Integer, String, Long>>(Time.seconds(10)) {
+>                            @Override
+>                            public long extractTimestamp(Tuple3<Integer, String, Long> element) {
+>                                return element.f2;
+>                            }
+>                        });
+>
+>        //转变为Table
+>        Table userTable = tableEnv.fromDataStream(textStream, "user_name,city_id,ts.rowtime");
+>        Table cityTable = tableEnv.fromDataStream(cityStream, "city_id,city_name,ts.rowtime");
+>
+>        tableEnv.createTemporaryView("userTable", userTable);
+>        tableEnv.createTemporaryView("cityTable", cityTable);
+>
+>        //定义一个TemporalTableFunction
+>        TemporalTableFunction dimCity = cityTable.createTemporalTableFunction("ts", "city_id");
+>        //注册表函数
+>        tableEnv.registerFunction("dimCity", dimCity);
+>
+>        //关联查询
+>        Table result = tableEnv
+>                .sqlQuery("select u.user_name,u.city_id,d.city_name,u.ts from userTable as u " +
+>                        ", Lateral table (dimCity(u.ts)) d " +
+>                        "where u.city_id=d.city_id");
+>
+>        //打印输出
+>        DataStream resultDs = tableEnv.toAppendStream(result, Row.class);
+>        resultDs.print();
+>        env.execute("joinDemo");
+>    }
+>}
+>```
+>
+>#### [5、四种维表关联方式总结](http://mp.weixin.qq.com/s?__biz=MzU3MzgwNTU2Mg==&mid=2247486949&idx=1&sn=53f0e2a9430eea35ee54ca5f18ac49c5&chksm=fd3d4b70ca4ac26640a489aabec93cb331fec0782c9a7360d823ee81c405a1da97334407d3b0&scene=21#wechat_redirect)
+>
+>![image-20220818174040620](flink_note.assets/image-20220818174040620.png)
+>
+>
+
+## 部署模式
+
+https://www.bilibili.com/video/BV133411s7Sa?p=19&vd_source=be121e25b1e5e0868ca5292fe647abcb
+
+会话模式：先起集群，然后部署作业
+
+单作业模式: 借助资源管理器，根据作业创建集群。
+
+应用模式：
+
+![image-20220731153325440](flink_note.assets/image-20220731153325440.png)
+
+**结合资源管理平台后这些部署模式怎么用的？**
+
+* Standalone
+
+独立模式：不借助资源管理平台
+
+* yarn 模式 部署
+
+1）会话模式
+
+2）单作业模式
+
+flink1.8 之前，flink版本里面加上了 hadoop 版本的支持。
+
+1.8 之后就没有了。需要再官网上自行下载 hadoop 版本的支持，放到flink 的 lib/ 下。
+
+![image-20220731160530507](flink_note.assets/image-20220731160530507.png)
+
+然后，配置环境变量并启动。
+
+![image-20220731163529248](flink_note.assets/image-20220731163529248.png)
+
+
+
+
+
+
+
+
+
+## CEP 复杂事件处理？？？
+
+
+
+
+
+## Flink1.11+Hive批流一体数仓
+
+https://zhuanlan.zhihu.com/p/434562109
+
+>Flink 和 hive 的集成。
+>
+>
 
 ## flink keyBy 的原理
 
@@ -2632,9 +4538,47 @@ Flink 集群启动后只会运行单个作业，一旦作业结束，集群就�
 
 
 
+# 尚硅谷 2022 Flink 1.13 实战
 
+https://www.bilibili.com/video/BV133411s7Sa?p=127&vd_source=be121e25b1e5e0868ca5292fe647abcb
 
+## P128
 
+![image-20220814152045469](flink_note.assets/image-20220814152045469.png)
+
+![image-20220814152630561](flink_note.assets/image-20220814152630561.png)
+
+还是直接写 sql 最为方便。
+
+## P130
+
+### 创建 流/批处理环境
+
+![image-20220814183656629](flink_note.assets/image-20220814183656629.png)
+
+![image-20220814183831833](flink_note.assets/image-20220814183831833.png)
+
+### Rowkind
+
+```java
+package org.apache.flink.types;
+public enum RowKind {
+    INSERT("+I", (byte) 0), //代表新增
+    UPDATE_BEFORE("-U", (byte) 1), //代表更新前的数据
+    UPDATE_AFTER("+U", (byte) 2), //代表更新后的数据
+    DELETE("-D", (byte) 3); //代表删除
+}
+/*
+结合 upsert kafka 打个比方 主键为id 1,name 为 2的 的数据
+如果消费到一条主键为1 的数据 print 出来是这样的
+| +I |                              1 |                              2 |  //代表新增
+如果再消费到一条主键为1 的name为其他比如是22的数据 print 出来是这样的
+| -U |                              1 |                              2 |  //代表更新前的数据
+| +U |                              1 |                              22 | //代表更新后的数据
+如果再消费到只含有主键为1 的数据 print 出来是这样的
+| -D |                              1 |                              22 | //代表删除
+*/
+```
 
 
 
