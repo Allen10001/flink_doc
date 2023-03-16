@@ -8,6 +8,28 @@ https://cf.jd.com/pages/viewpage.action?pageId=644730231
 
 # 问题
 
+### 背感压力，Flink背压你了解多少？
+
+https://www.51cto.com/article/686096.html
+
+>### 解决背压
+>
+>Flink 不需要一个特殊的机制来处理背压，因为Flink中的数据传输相当于已经提供了应对背压的机制。所以只有从代码上与资源上去做一些调整。
+>
+>(1)背压部分原因可能是由于数据倾斜造成的，我们可以通过 Web UI 各个 SubTask 的 指标值来确认。Checkpoint detail 里不同 SubTask 的 State size 也是一个分析数据倾斜的有用指标。解决方式把数据分组的 key 预聚合来消除数据倾斜。
+>
+>(2)代码的执行效率问题，阻塞或者性能问题。
+>
+>(3)TaskManager 的内存大小导致背压。
+
+### TaskManager 背压较高/严重事件
+
+https://cloud.tencent.com/document/product/849/65095
+
+>
+>
+>
+
 ### ["Buffer pool is destroyed" issue found in Apache Flink flapMap Operator](https://stackoverflow.com/questions/55468495/buffer-pool-is-destroyed-issue-found-in-apache-flink-flapmap-operator)
 
 >> What is a Buffer pool?
@@ -1292,7 +1314,7 @@ Back pressure monitoring works by repeatedly taking back pressure samples of you
 
 ![img](flink_note.assets/back_pressure_sampling.png)
 
-Internally, back pressure is judged based on the availability of output buffers. If there is no available buffer (at least one) for output, then it indicates that there is back pressure for the task.
+**Internally, back pressure is judged based on the availability of output buffers.** If there is no available buffer (at least one) for output, then it indicates that there is back pressure for the task.
 
 By default, **the job manager triggers 100 samples every 50ms for each task in order to determine back pressure.** The ratio you see in the web interface tells you how many of these samples were indicating back pressure, e.g. `0.01` indicates that only 1 in 100 was back pressured.
 
