@@ -1,12 +1,60 @@
 
 
-# 记录
-
-## [Flink 消费 Kafka 分区顺序性问题](https://cf.jd.com/pages/viewpage.action?pageId=644730231)
-
-https://cf.jd.com/pages/viewpage.action?pageId=644730231
-
 # 问题
+
+## Flink 消费 Kafka 分区顺序性问题
+
+># 1、kafka 分区数据顺序性
+>
+>**kafka 具有分区内数据有序的特点，可以通过将数据指定到特定的分区来实现数据的顺序性。**
+>
+>kafka 分区逻辑代码如下：如果指定了分区号生产，则发送到指定分区；否则调用分区器计算方法 partitioner.partition()
+>
+>**partitioner.partition**
+>
+>```java
+>private int partition(ProducerRecord<K, V> record, byte[] serializedKey, byte[] serializedValue, Cluster cluster) {
+>    Integer partition = record.partition();
+>    return partition != null ?
+>            partition :
+>            partitioner.partition(
+>                    record.topic(), record.key(), serializedKey, record.value(), serializedValue, cluster);
+>}
+>```
+>
+>一共三个分区器实现了 Partitioner类的 partition()方法：
+>
+>1.  **DefaultPartitioner**
+>   **指定分区则使用；否则如果存在 key 则根据 key 去 hash；否则 batch 满了切换分区。**
+>2.  **RoundRobinPartitioner**
+>   没指定分区则平均分配循环写入分区。
+>3.  **UniformStickyPartitioner**
+>   和默认相比去除掉 key 取 hash 相关的规则。
+>
+>综上，我们想实现数据顺序入 kafka，可以指定分区写或者通过设置 key 值相同保证数据入同一个分区。但是要注意避免全部数据入同一分区的场景，最好将数据分组即保证组内数据有序而不是全局有序。
+>
+>如果采用设置 key 值相同方式进行组内数据入同一分区，则计算分区方式如下：
+>
+>**partition**
+>
+>```java
+>public int partition(String topic, Object key, byte[] keyBytes, Object value, byte[] valueBytes, Cluster cluster) {
+>    //key为null等同于UniformStickyPartitioner分区器
+>    if (keyBytes == null) {
+>        return stickyPartitionCache.partition(topic, cluster);
+>    }
+>    List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
+>    int numPartitions = partitions.size();
+>    // key取hash后再取正值(并非绝对值)再对分区数量取余
+>    return Utils.toPositive(Utils.murmur2(keyBytes)) % numPartitions;
+>}
+>```
+>
+>经测试尽量保证key的前缀多样化来保证数据的均匀分布，可以对自己的数据进行测试来敲定key的定义方式。
+>
+>2、Flink 消费 kafka 的顺序性
+>
+>https://www.jianshu.com/p/666ee37357df
 
 ### 背感压力，Flink背压你了解多少？
 
@@ -22,13 +70,77 @@ https://www.51cto.com/article/686096.html
 >
 >(3)TaskManager 的内存大小导致背压。
 
+## 腾讯云-flink 事件与诊断
+
+### 快照失败事件
+
+https://cloud.tencent.com/document/product/849/64491
+
+>查日志、查监控。
+
 ### TaskManager 背压较高/严重事件
 
 https://cloud.tencent.com/document/product/849/65095
 
+>系统每5分钟会检测一次 Flink 作业的算子背压情况。如果发现某个算子的背压值（如果算子有多个并行度，则取最大值）高于50%，则继续向下查找，直到遇到第一个背压值（图中的 Backpressured）低于阈值，但是繁忙度（图中的 Busy）高于50% 的算子，该算子通常是处理速度较慢、引起背压的根源。此时如果 [查看 Flink Web UI](https://cloud.tencent.com/document/product/849/48292)，可以看到一系列的灰色算子后紧跟着一个红色算子，如下图：
+>
+>![image-20230317155059837](flink_note.assets/image-20230317155059837.png)
+>
+>收到该事件推送后，我们建议立刻  [查看 Flink Web UI](https://cloud.tencent.com/document/product/849/48292)，分析当前的运行图。如果可以找到引发背压的根源算子，则建议使用 Flink UI 内置的 [火焰图功能](https://nightlies.apache.org/flink/flink-docs-release-1.13/docs/ops/debugging/flame_graphs/) 分析 CPU 调用热点，即占用 CPU 时间片较多的方法（首先需要在作业的 [高级参数](https://cloud.tencent.com/document/product/849/53391) 选项中，加入 `rest.flamegraph.enabled: true` 参数，并重新发布作业版本，才可使用火焰图绘制功能）。
+>
+>![image-20230317155614960](flink_note.assets/image-20230317155614960.png)
+>
+>此外，我们建议增加作业的 [资源配置](https://cloud.tencent.com/document/product/849/57772)，例如调大 TaskManager 的规格（提升 TaskManager 的 CPU 配额，可以有更多的 CPU 资源来处理数据），提升作业的算子并行度（降低单个 TaskManager 的数据处理量，减少 CPU 计算压力）等，令数据能够更有效地处理。
+
+### TaskManager Pod 异常退出事件
+
+https://cloud.tencent.com/document/product/849/64500
+
+Flink 作业的 TaskManager 运行在 Kubernetes Pod 中，当 Pod 终止时，我们可以监测到该事件，并根据返回码、状态信息等维度，判断 Pod 是否发生了异常。
+
+## 如何分析及处理 Flink 反压？
+
+https://developer.aliyun.com/article/727389
+
+>### 反压的影响
+>
+>是因为 Flink 的 checkpoint 机制，反压还会影响到两项指标: checkpoint 时长和 state 大小。
+>
+>- 前者是因为 checkpoint barrier 是不会越过普通数据的，数据处理被阻塞也会导致 checkpoint barrier 流经整个数据管道的时长变长，因而 checkpoint 总体时间（End to End Duration）变长。
+>- 后者是因为为保证 EOS（Exactly-Once-Semantics，准确一次），对于有两个以上输入管道的 Operator，checkpoint barrier 需要对齐（Alignment），接受到较快的输入管道的 barrier 后，它后面数据会被缓存起来但不处理，直到较慢的输入管道的 barrier 也到达，这些被缓存的数据会被放到state 里面，导致 checkpoint 变大。
+>
+>如果处于反压状态，那么有两种可能性：
+>
+>1. 该节点的发送速率跟不上它的产生数据速率。这一般会发生在一条输入多条输出的 Operator（比如 flatmap）。
+>2. 下游的节点接受速率较慢，通过反压机制限制了该节点的发送速率。
+>
+>**值得注意的是，反压的根源节点并不一定会在反压面板体现出高反压**，因为反压面板监控的是发送端，如果某个节点是性能瓶颈并不会导致它本身出现高反压，而是导致它的上游出现高反压。总体来看，**如果我们找到第一个出现反压的节点，那么反压根源要么是就这个节点，要么是它紧接着的下游节点。**
+>
+>那么如果区分这两种状态呢？很遗憾只通过反压面板是无法直接判断的，我们还需要结合 Metrics 或者其他监控手段来定位。此外如果作业的节点数很多或者并行度很大，由于要采集所有 Task 的栈信息，反压面板的压力也会很大甚至不可用。
+>
+>首先我们简单回顾下 Flink 1.5 以后的网路栈，熟悉的读者可以直接跳过。
+>
+>**TaskManager 传输数据时**，不同的 TaskManager 上的两个 Subtask 间通常根据 key 的数量有多个 Channel，**这些 Channel 会复用同一个 TaskManager 级别的 TCP 链接，并且共享接收端 Subtask 级别的 Buffer Pool。**
+>
+>**在接收端**，每个 Channel 在初始阶段会被分配固定数量的 Exclusive Buffer，这些 Buffer 会被用于存储接受到的数据，交给 Operator 使用后再次被释放。Channel 接收端空闲的 Buffer 数量称为 Credit，Credit 会被定时同步给发送端被后者用于决定发送多少个 Buffer 的数据。
+>
+>**在流量较大时，Channel 的 Exclusive Buffer 可能会被写满，此时 Flink 会向 Buffer Pool 申请剩余的 Floating Buffer。这些 Floating Buffer 属于备用 Buffer，哪个 Channel 需要就去哪里。**而在 **Channel 发送端，一个 Subtask 所有的 Channel 会共享同一个 Buffer Pool，这边就没有区分 Exclusive Buffer 和 Floating Buffer。**
+>
+>**分析具体原因及处理**
+>
+>定位到反压节点后，分析造成原因的办法和我们分析一个普通程序的性能瓶颈的办法是十分类似的，可能还要更简单一点，因为我们要观察的主要是 Task Thread。
+>
+>**在实践中，很多情况下的反压是由于数据倾斜造成的**，这点我们可以通过 Web UI 各个 **SubTask 的 Records Sent 和 Record Received 来确认，另外 Checkpoint detail 里不同 SubTask 的 State size 也是一个分析数据倾斜的有用指标。**
+>
+>**此外，最常见的问题可能是用户代码的执行效率问题（频繁被阻塞或者性能问题）**。最有用的办法就是对 TaskManager 进行 CPU profile，从中我们可以分析到 Task Thread 是否跑满一个 CPU 核：如果是的话要分析 CPU 主要花费在哪些函数里面，比如我们生产环境中就偶尔遇到卡在 Regex 的用户函数（ReDoS）；如果不是的话要看 Task Thread 阻塞在哪里，可能是用户函数本身有些同步的调用，可能是 checkpoint 或者 GC 等系统活动导致的暂时系统暂停。
+>
+>当然，性能分析的结果也可能是正常的，只是作业申请的资源不足而导致了反压，这就通常要求拓展并行度。值得一提的，在未来的版本 **Flink 将会直接在 WebUI 提供 JVM 的 CPU 火焰图**[5]，这将大大简化性能瓶颈的分析。
+>
+>**另外 TaskManager 的内存以及 GC 问题也可能会导致反压**，包括 TaskManager JVM 各区内存不合理导致的频繁 Full GC 甚至失联。推荐可以通过给 TaskManager 启用 G1 垃圾回收器来优化 GC，并加上 -XX:+PrintGCDetails 来打印 GC 日志的方式来观察 GC 的问题。
 >
 >
->
+
+
 
 ### ["Buffer pool is destroyed" issue found in Apache Flink flapMap Operator](https://stackoverflow.com/questions/55468495/buffer-pool-is-destroyed-issue-found-in-apache-flink-flapmap-operator)
 
@@ -56,8 +168,6 @@ https://cloud.tencent.com/document/product/849/65095
 >
 >I don't see a benefit of using the proxy serializer pattern. It's unnecessarily complex (custom serialization in Java) and offers little benefit.
 
-### 什么是数据倾斜
-
 ### Funtion 中的局部变量是如何处理的？？
 
 [Difference between Flink state and ordinary class variables](https://stackoverflow.com/questions/60143785/difference-between-flink-state-and-ordinary-class-variables)
@@ -66,11 +176,13 @@ https://cloud.tencent.com/document/product/849/65095
 >
 >Flink takes periodic checkpoints of the state it is managing. In the event of a failure, your job can automatically recover using the latest checkpoint, and resume processing. You can also manually trigger a state snapshot (called a savepoint in this case) and use it to restart after a redeployment. While you are at it, you can also rescale the cluster up or down.
 >
->You can also choose where your Flink state lives -- either as objects on the heap, or as serialized bytes on disk. Thus it is possible to have much more state than can fit in memory.
+>You can also choose where your Flink state lives -- **either as objects on the heap, or as serialized bytes on disk.** Thus it is possible to have much more state than can fit in memory.
 >
 >From an operational perspective, this is more like having your data in a database, than in memory. But from a performance perspective, it's more like using variables: the state is always local, available with high throughput and low latency.
 >
 >In addition to what David wrote, ValueState is scoped to the key while a regular field is scoped to **the operator instance.** 
+
+## 什么是数据倾斜
 
 [面试必问&数据倾斜](https://zhuanlan.zhihu.com/p/64240857)
 
@@ -212,18 +324,34 @@ https://gitlab.bigdata.letv.com/data-realtime/rdp.jobs.mob   中的 rdp.mob.ios.
 >
 >### Lazy Initialization
 >
->One way to use non-serializable types in Flink functions is to lazily initialize them. The fields that hold these types are still `null` when the function is serialized to be shipped, and only set after the function has been deserialized by the workers.
+>One way to use non-serializable types in Flink functions is to lazily initialize them. The fields that hold these types are still `null` when the function is serialized to be shipped, and **only set after the function has been deserialized by the workers.**
 >
 >- In Scala, you can simply use lazy fields, for example `lazy val x = new NonSerializableType()`. The `NonSerializableType` type is actually only created upon first access to the variable `x`, which is usually on the worker. Consequently, the type can be non serializable, because `x` is null when the function is serialized to shipping to the workers.
->- In Java, you can initialize the non-serializable fields on the `open()` method of the function, if you make it a *Rich Function*. Rich functions (like `RichMapFunction`) are extended versions of basic functions (here `MapFunction`) and give you access to life-cycle methods like `open()` and `close()`.
+>- **In Java, you can initialize the non-serializable fields on the `open()` method of the function, if you make it a *Rich Function*.** Rich functions (like `RichMapFunction`) are extended versions of basic functions (here `MapFunction`) and give you access to life-cycle methods like `open()` and `close()`.
 >
 >
-
-# 测试环境
 
 
 
 # 官网资料
+
+## Flame Graphs
+
+https://nightlies.apache.org/flink/flink-docs-release-1.13/docs/ops/debugging/flame_graphs/
+
+[Flame Graphs](http://www.brendangregg.com/flamegraphs.html) are a visualization that effectively surfaces answers to questions like:
+
+- Which methods are currently consuming CPU resources?
+- How does consumption by one method compare to the others?
+- Which series of calls on the stack led to executing a particular method?
+
+![img](flink_note.assets/flame_graph_on_cpu.png)
+
+Flame Graphs are constructed by sampling stack traces a number of times. **Each method call is presented by a bar, where the length of the bar is proportional to the number of times it is present in the samples.**
+
+
+
+
 
 ## table api 之 hive
 
@@ -236,6 +364,22 @@ Flink 与 Hive 的集成包含两个层面。
 二是**利用 Flink 来读写 Hive 的表。**
 
 `HiveCatalog`的设计提供了与 Hive 良好的兼容性，用户可以"开箱即用"的访问其已有的 Hive 数仓。 您不需要修改现有的 Hive Metastore，也不需要更改表的数据位置或分区。
+
+## 【Hive】Hive MetaStore 3.1.x 元数据管理库表结构介绍及特色功能
+
+https://blog.csdn.net/m0_54252387/article/details/125756999
+
+>![image-20230318171809569](flink_note.assets/image-20230318171809569.png)
+>
+>![image-20230318171832523](flink_note.assets/image-20230318171832523.png)
+>
+>![image-20230318171851223](flink_note.assets/image-20230318171851223.png)
+>
+>![image-20230318172240930](flink_note.assets/image-20230318172240930.png)
+>
+>
+
+
 
 ## hive 方言
 
@@ -675,16 +819,16 @@ INSERT INTO TABLE fact_tz PARTITION (day, hour) select 1, '2022-8-8', '14';
 >**make data warehouse streaming**，就是让整个数仓的数据全实时地流动起来，且是以纯流的方式而不是微批（mini-batch）的方式流动.
 >**目标是实现一个具备端到端实时性的纯流服务（Streaming Service）**，用一套 API 分析所有流动中的数据，当源头数据发生变化，比如捕捉到在线服务的 Log 或数据库的 Binlog 以后，就按照提前定义好的 Query 逻辑或数据处理逻辑，对数据进行分析，分析后的数据落到数仓的某一个分层，再从第一个分层向下一个分层流动，然后数仓所有分层会全部流动起来，最终流到一个在线系统里，用户可以看到整个数仓的全实时流动效果。
 >在这个过程中，**数据是主动的，而查询是被动的**，分析由数据的变化来驱动。同时在垂直方向上，**对每一个数据明细层，用户都可以执行 Query 进行主动查询，并且能实时获得查询结果**。此外，它还能兼容离线分析场景，API 依然是同一套，实现真正的一体化。
->流式数仓是终态，要达成这个目标，Flink 需要一个配套的流批一体存储支持，为此，Flink 社区提出了新的 **Dynamic Table Storage，即具备流表二象性的存储方案**。
+>流式数仓是终态，要达成这个目标，Flink 需要一个配套的**流批一体存储支持**，为此，Flink 社区提出了新的 **Dynamic Table Storage，即具备流表二象性的存储方案**。
 >
 >什么是Dynamic table
 >
 >**动态表是Flink的Table API和SQL对流数据支持的核心概念，动态表是一个逻辑概念，它有两种不同的物理表示:更改日志和表**
 >
->- 与静态表相比，动态表的数据会随时间而变化，但可以像静态表一样查询动态表
->- 查询动态表产生一个连续查询。连续查询永远不会终止，并产生动态结果【另一个动态表】
->- 查询不断更新其(动态)结果表，以反映其(动态)输入表上的更改
->- 从本质上讲，对动态表的连续查询与定义物化视图的查询非常相似。
+>- **与静态表相比，动态表的数据会随时间而变化，但可以像静态表一样查询动态表**
+>- **查询动态表产生一个连续查询。连续查询永远不会终止，并产生动态结果【另一个动态表】**
+>- **查询不断更新其(动态)结果表，以反映其(动态)输入表上的更改**
+>- **从本质上讲，对动态表的连续查询与定义物化视图的查询非常相似。**
 >
 >高级关系数据库系统提供称为"物化视图"的功能。物化视图定义为SQL查询，就像常规虚拟视图一样。
 >**物化视图缓存查询的结果，使得在访问视图时不需要执行查询**。
@@ -1230,7 +1374,7 @@ https://help.aliyun.com/document_detail/62531.html
 
 #### 概述
 
-在维表DDL语法中增加1行PERIOD FOR SYSTEM_TIME的声明，定义维表的变化周期，即可使用标准的CREATE TABLE语法定义实时计算维表。
+在维表 DDL语法中增加1行PERIOD FOR SYSTEM_TIME的声明，定义维表的变化周期，即可使用标准的CREATE TABLE语法定义实时计算维表。
 
 ```sql
 CREATE TABLE white_list (
@@ -1344,7 +1488,7 @@ You can configure the number of samples for the job manager with the following c
 >
 >## 任务和算子链
 >
->分布式计算中，Flink 将算子（operator）的 subtask *链接（chain）*成 task。每个 task 由一个线程执行。把算子链接成 tasks 能够减少线程间切换和缓冲的开销，在降低延迟的同时提高了整体吞吐量。链接操作的配置详情可参考：[chaining docs](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/dev/stream/operators/#task-chaining-and-resource-groups)
+>分布式计算中，Flink 将算子（operator）的 subtask *链接（chain）*成 task。每个 task 由一个线程执行。把算子链接成 tasks 能够**减少线程间切换和缓冲的开销**，在**降低延迟的同时提高了整体吞吐量**。链接操作的配置详情可参考：[chaining docs](https://nightlies.apache.org/flink/flink-docs-release-1.9/zh/dev/stream/operators/#task-chaining-and-resource-groups)
 >
 >下图的 dataflow 由五个 subtasks 执行，因此具有五个并行线程。
 >
@@ -1528,17 +1672,17 @@ https://developer.aliyun.com/article/990843
 >
 >当前使用Flink最新版本 1.12，支持 CDC 功能和更好的流批一体。**Apache Iceberg最新版本0.11已经支持Flink API方式upsert，**如果使用编写框架代码的方式使用该功能，无异于镜花水月，可望而不可及。**本着SQL就是生产力的初衷，该测试使用最新Iceberg的master分支代码编译尝鲜，并对源码稍做修改，达到支持使用Flink SQL方式upsert。**
 >
->先来了解一下什么是**Row-Level Delete？该功能是指根据一个条件从一个数据集里面删除指定行。**那么为什么这个功能那么重要呢？众所周知，大数据中的行级删除不同于传统数据库的更新和删除功能，在基于HDFS架构的文件系统上数据存储只支持数据的追加，为了在该构架下支持更新删除功能，**删除操作演变成了一种标记删除，更新操作则是转变为先标记删除、后插入一条新数据。具体实现方式可以分为Copy on Write（COW）模式和Merge on Read（MOR）模式，其中Copy on Write模式可以保证下游的数据读具有最大的性能，而Merge on Read模式保证上游数据插入、更新、和删除的性能，减少传统Copy on Write模式下写放大问题。**
+>先来了解一下什么是**Row-Level Delete？该功能是指根据一个条件从一个数据集里面删除指定行。**那么为什么这个功能那么重要呢？众所周知，大数据中的行级删除不同于传统数据库的更新和删除功能，在基于HDFS架构的文件系统上数据存储只支持数据的追加，为了在该构架下支持更新删除功能，**删除操作演变成了一种标记删除，更新操作则是转变为先标记删除、后插入一条新数据。具体实现方式可以分为Copy on Write（COW）模式和Merge on Read（MOR）模式，其中 Copy on Write 模式可以保证下游的数据读具有最大的性能，而Merge on Read模式保证上游数据插入、更新、和删除的性能，减少传统Copy on Write模式下写放大问题。**
 >
->**在Apache Iceberg中目前实现的是基于Merge on Read模式实现的Row-Level Delete。在 Iceberg中MOR相关的功能是在Iceberg Table Spec Version 2: Row-level Deletes中进行实现的，V1是没有相关实现的。** 虽然**当前Apache Iceberg 0.11版本不支持Flink SQL方式进行Row-Level Delete，但为了方便测试，通过对源码的修改支持Flink SQL方式。**在不远的未来，Apache Iceberg 0.12版本将会对Row-Level Delete进行性能和稳定性的加强。
+>**在Apache Iceberg中目前实现的是基于Merge on Read模式实现的Row-Level Delete。在 Iceberg中MOR相关的功能是在Iceberg Table Spec Version 2: Row-level Deletes 中进行实现的，V1是没有相关实现的。** 虽然**当前Apache Iceberg 0.11版本不支持Flink SQL方式进行Row-Level Delete，但为了方便测试，通过对源码的修改支持Flink SQL方式。**在不远的未来，Apache Iceberg 0.12版本将会对Row-Level Delete进行性能和稳定性的加强。
 >
 >Flink SQL CDC和Apache Iceberg的架构设计和整合如何巧妙，不能局限于纸上谈兵，下面就实际操作一下，体验其功能的强大和带来的便捷。并且顺便体验一番流批一体，下面的离线查询和实时upsert入湖等均使用Flink SQL完成。
 >
 >**c）结论**
 >
->- append方式导入速度远大于upsert导入数据速度。在使用的时候，如没有更新数据的场景时，则不需要upsert方式导入数据。
->- 导入速度随着并行度的增加而增加。
->- upsert方式数据的插入和更新速度相差不大，主要得益于MOR原因。
+>- **append方式导入速度远大于upsert导入数据速度。在使用的时候，如没有更新数据的场景时，则不需要upsert方式导入数据。**
+>- **导入速度随着并行度的增加而增加。**
+>- **upsert方式数据的插入和更新速度相差不大，主要得益于MOR原因。**
 >
 >### 3，数据入湖任务运维
 >
@@ -1559,7 +1703,7 @@ https://developer.aliyun.com/article/990843
 >
 >**b）快照过期处理**
 >
->iceberg本身的架构设计决定了，对于实时入湖场景，会产生大量的snapshot文件，快照过期策略是通过额外的定时任务周期执行，过期snapshot文件和过期数据文件均会被删除。如果实际使用场景不需要time travel功能，则可以保留较少的snapshot文件。
+>iceberg 本身的架构设计决定了，对于实时入湖场景，会产生大量的snapshot文件，快照过期策略是通过额外的定时任务周期执行，过期snapshot文件和过期数据文件均会被删除。如果实际使用场景不需要time travel功能，则可以保留较少的snapshot文件。
 >
 >```java
 >`Table table = ...   
@@ -1666,7 +1810,7 @@ https://blog.51cto.com/bytedata/5130579
 >
 >2. Sort-Merge Join 分为 Sort 和 Merge 两个阶段：**首先将两个数据集进行分别排序，然后再对两个有序数据集分别进行遍历和匹配，类似于归并排序的合并。(Sort-Merge Join 要求对两个数据集进行排序，但是如果两个输入是有序的数据集，则可以作为一种优化方案)。**
 >
->3. Hash Join 同样分为两个阶段：首先将一个数据集转换为 Hash Table，然后遍历另外一个数据集元素并与 Hash Table 内的元素进行匹配。
+>3. Hash Join 同样分为两个阶段：**首先将一个数据集转换为 Hash Table，然后遍历另外一个数据集元素并与 Hash Table 内的元素进行匹配。**
 >
 >- 第一阶段和第一个数据集分别称为 build 阶段和 build table；
 >- 第二个阶段和第二个数据集分别称为 probe 阶段和 probe table。
@@ -1675,7 +1819,7 @@ https://blog.51cto.com/bytedata/5130579
 >
 >注意：Sort-Merge Join 和 Hash Join 只适用于 Equi-Join ( Join 条件均使用等于作为比较算子)。
 >
->**Flink SQL 流批一体的核心是：流表二象性。**围绕这一核心有若干概念，例如，动态表（Dynamic Table）/时态表（Temporal Table）、版本（Version）、版本表（Version Table）、普通表、连续查询、物化视图/虚拟视图、CDC（Change Data Capture）、Changelog Stream。
+>**Flink SQL 流批一体的核心是：流表二象性。** 围绕这一核心有若干概念，例如，动态表（Dynamic Table）/时态表（Temporal Table）、版本（Version）、版本表（Version Table）、普通表、连续查询、物化视图/虚拟视图、CDC（Change Data Capture）、Changelog Stream。
 >
 >![image-20221022204529919](flink_note.assets/image-20221022204529919.png)
 >
@@ -1683,7 +1827,7 @@ https://blog.51cto.com/bytedata/5130579
 >2. **在动态表上计算一个连续查询，生成一个新的动态表。**
 >3. **生成的动态表被转换回流。**
 >
->理解：流和表只是数据在特定场景下的两种形态（联想到光的波粒二象性？笔者已经傻傻分不清）
+>理解：流和表只是数据在特定场景下的两种形态。
 >
 >**temporal join**
 >
@@ -1823,7 +1967,7 @@ https://www.bilibili.com/read/cv12681921/
 
 https://blog.51cto.com/u_14222592/2892963
 
-## Flink SQL之Catalogs
+## Flink SQL之 Catalogs
 
 https://developer.aliyun.com/article/926528
 
@@ -1851,7 +1995,7 @@ https://developer.aliyun.com/article/926528
 >
 >**警告 Hive Metastore 以小写形式存储所有元数据对象名称。而 GenericInMemoryCatalog 区分大小写。**
 >
->## （3）Catalogs在Flink SQL架构中的位置
+>## （3）Catalogs 在 Flink SQL 架构中的位置
 >
 >![image-20221012151814873](flink_note.assets/image-20221012151814873.png)
 >
@@ -1941,7 +2085,7 @@ https://www.51cto.com/article/587866.html
 
 >**2. 用 Correlated subquery解决**
 >
->Correlated subquery 是在subquery中使用关联表的字段，subquery可以在FROM Clause中也可以在WHERE Clause中。
+>Correlated subquery 是在subquery中使用关联表的字段，subquery 可以在 FROM Clause 中也可以在WHERE Clause中。
 >
 >- WHERE Clause
 >
@@ -2062,20 +2206,39 @@ https://www.51cto.com/article/587866.html
 
 >**基于间隔的 Join 和 基于窗口的 Join**
 >
->如果Flink内置的Join算子无法表达所需的Join语义，那么你可以通过CoProcessFunction、BroadcastProcessFunction或KeyedBroadcastProcessFunction实现自定义的Join逻辑。
+>如果Flink内置的Join算子无法表达所需的Join语义，那么你可以通过**CoProcessFunction、BroadcastProcessFunction或KeyedBroadcastProcessFunction**实现自定义的Join逻辑。
 >
 >注意，你要设计的Join算子需要具备高效的状态访问模式及有效的状态清理策略。
 >
->对划分窗口后的数据流进行Join可能会产生意想不到的语义。例如，假设你为执行Join操作的算子配置了1小时的滚动窗口，那么一旦来自两个输入的元素没有被划分到同一窗口，它们就无法Join在一起，即使二者彼此仅相差1秒钟。
+>## 1.1 基于间隔的Join
+>
+>基于间隔的Join会对两条流中拥有相同键值以及彼此之间时间戳不超过某一指定间隔的事件进行Join。
+>
+>基于间隔的Join目前只支持事件时间以及INNER JOIN语义（无法发出未匹配成功的事件）。下面的例子定义了一个基于间隔的Join。
+>
+>```java
+>input1
+>  .intervalJoin(input2)
+>  .between(<lower-bound>, <upper-bound>) // 相对于input1的上下界
+>  .process(ProcessJoinFunction) // 处理匹配的事件对
+>```
+>
+>Join成功的事件对会发送给ProcessJoinFunction。下界和上界分别由负时间间隔和正时间间隔来定义，例如between(Time.hour(-1), Time.minute(15))。在满足下界值小于上界值的前提下，你可以任意对它们赋值。例如，允许出现B中事件的时间戳相较A中事件的时间戳早1～2小时这样的条件。
+>
+>基于间隔的Join需要同时对双流的记录进行缓冲。
+>
+>## 1.2 基于窗口的join
+>
+>**对划分窗口后的数据流进行Join可能会产生意想不到的语义。**例如，假设你为执行Join操作的算子配置了1小时的滚动窗口，那么一旦来自两个输入的元素没有被划分到同一窗口，它们就无法Join在一起，即使二者彼此仅相差1秒钟。
 >
 >**Flink 维表join实践**
 >
 >常见的维表Join方式有四种：
 >
->- 预加载维表
->- 热存储维表
->- 广播维表
->- Temporal table function join
+>- **预加载维表**
+>- **热存储维表**
+>- **广播维表**
+>- **Temporal table function join**
 >
 >**1.预加载维表**
 >
@@ -2125,83 +2288,83 @@ https://www.51cto.com/article/587866.html
 >import java.util.concurrent.TimeUnit;
 >
 >public class JoinDemo3 {
->    public static void main(String[] args) throws Exception {
+>   public static void main(String[] args) throws Exception {
 >
->        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
->        DataStream<Tuple2<String, Integer>> textStream = env.socketTextStream("localhost", 9000, "\n")
->                .map(p -> {
->                    //输入格式为：user,1000,分别是用户名称和城市编号
->                    String[] list = p.split(",");
->                    return new Tuple2<String, Integer>(list[0], Integer.valueOf(list[1]));
->                })
->                .returns(new TypeHint<Tuple2<String, Integer>>() {
->                });
+>       StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+>       DataStream<Tuple2<String, Integer>> textStream = env.socketTextStream("localhost", 9000, "\n")
+>               .map(p -> {
+>                   //输入格式为：user,1000,分别是用户名称和城市编号
+>                   String[] list = p.split(",");
+>                   return new Tuple2<String, Integer>(list[0], Integer.valueOf(list[1]));
+>               })
+>               .returns(new TypeHint<Tuple2<String, Integer>>() {
+>               });
 >
 >
->        DataStream<Tuple3<String,Integer, String>> orderedResult = AsyncDataStream
->                //保证顺序：异步返回的结果保证顺序，超时时间1秒，最大容量2，超出容量触发反压
->                .orderedWait(textStream, new JoinDemo3AyncFunction(), 1000L, TimeUnit.MILLISECONDS, 2)
->                .setParallelism(1);
+>       DataStream<Tuple3<String,Integer, String>> orderedResult = AsyncDataStream
+>               //保证顺序：异步返回的结果保证顺序，超时时间1秒，最大容量2，超出容量触发反压
+>               .orderedWait(textStream, new JoinDemo3AyncFunction(), 1000L, TimeUnit.MILLISECONDS, 2)
+>               .setParallelism(1);
 >
->        DataStream<Tuple3<String,Integer, String>> unorderedResult = AsyncDataStream
->                //允许乱序：异步返回的结果允许乱序，超时时间1秒，最大容量2，超出容量触发反压
->                .unorderedWait(textStream, new JoinDemo3AyncFunction(), 1000L, TimeUnit.MILLISECONDS, 2)
->                .setParallelism(1);
+>       DataStream<Tuple3<String,Integer, String>> unorderedResult = AsyncDataStream
+>               //允许乱序：异步返回的结果允许乱序，超时时间1秒，最大容量2，超出容量触发反压
+>               .unorderedWait(textStream, new JoinDemo3AyncFunction(), 1000L, TimeUnit.MILLISECONDS, 2)
+>               .setParallelism(1);
 >
->        orderedResult.print();
->        unorderedResult.print();
->        env.execute("joinDemo");
->    }
+>       orderedResult.print();
+>       unorderedResult.print();
+>       env.execute("joinDemo");
+>   }
 >
->    //定义个类，继承RichAsyncFunction，实现异步查询存储在mysql里的维表
->    //输入用户名、城市ID，返回 Tuple3<用户名、城市ID，城市名称>
->    static class JoinDemo3AyncFunction extends RichAsyncFunction<Tuple2<String, Integer>, Tuple3<String, Integer, String>> {
->        // 链接
->        private static String jdbcUrl = "jdbc:mysql://192.168.145.1:3306?useSSL=false";
->        private static String username = "root";
->        private static String password = "123";
->        private static String driverName = "com.mysql.jdbc.Driver";
->        java.sql.Connection conn;
->        PreparedStatement ps;
+>   //定义个类，继承RichAsyncFunction，实现异步查询存储在mysql里的维表
+>   //输入用户名、城市ID，返回 Tuple3<用户名、城市ID，城市名称>
+>   static class JoinDemo3AyncFunction extends RichAsyncFunction<Tuple2<String, Integer>, Tuple3<String, Integer, String>> {
+>       // 链接
+>       private static String jdbcUrl = "jdbc:mysql://192.168.145.1:3306?useSSL=false";
+>       private static String username = "root";
+>       private static String password = "123";
+>       private static String driverName = "com.mysql.jdbc.Driver";
+>       java.sql.Connection conn;
+>       PreparedStatement ps;
 >
->        @Override
->        public void open(Configuration parameters) throws Exception {
->            super.open(parameters);
+>       @Override
+>       public void open(Configuration parameters) throws Exception {
+>           super.open(parameters);
 >
->            Class.forName(driverName);
->            conn = DriverManager.getConnection(jdbcUrl, username, password);
->            ps = conn.prepareStatement("select city_name from tmp.city_info where id = ?");
->        }
+>           Class.forName(driverName);
+>           conn = DriverManager.getConnection(jdbcUrl, username, password);
+>           ps = conn.prepareStatement("select city_name from tmp.city_info where id = ?");
+>       }
 >
->        @Override
->        public void close() throws Exception {
->            super.close();
->            conn.close();
->        }
+>       @Override
+>       public void close() throws Exception {
+>           super.close();
+>           conn.close();
+>       }
 >
->        //异步查询方法
->        @Override
->        public void asyncInvoke(Tuple2<String, Integer> input, ResultFuture<Tuple3<String,Integer, String>> resultFuture) throws Exception {
->            // 使用 city id 查询
->            ps.setInt(1, input.f1);
->            ResultSet rs = ps.executeQuery();
->            String cityName = null;
->            if (rs.next()) {
->                cityName = rs.getString(1);
->            }
->            List list = new ArrayList<Tuple2<Integer, String>>();
->            list.add(new Tuple3<>(input.f0,input.f1, cityName));
->            resultFuture.complete(list);
->        }
+>       //异步查询方法
+>       @Override
+>       public void asyncInvoke(Tuple2<String, Integer> input, ResultFuture<Tuple3<String,Integer, String>> resultFuture) throws Exception {
+>           // 使用 city id 查询
+>           ps.setInt(1, input.f1);
+>           ResultSet rs = ps.executeQuery();
+>           String cityName = null;
+>           if (rs.next()) {
+>               cityName = rs.getString(1);
+>           }
+>           List list = new ArrayList<Tuple2<Integer, String>>();
+>           list.add(new Tuple3<>(input.f0,input.f1, cityName));
+>           resultFuture.complete(list);
+>       }
 >
->        //超时处理
->        @Override
->        public void timeout(Tuple2<String, Integer> input, ResultFuture<Tuple3<String,Integer, String>> resultFuture) throws Exception {
->            List list = new ArrayList<Tuple2<Integer, String>>();
->            list.add(new Tuple3<>(input.f0,input.f1, ""));
->            resultFuture.complete(list);
->        }
->    }
+>       //超时处理
+>       @Override
+>       public void timeout(Tuple2<String, Integer> input, ResultFuture<Tuple3<String,Integer, String>> resultFuture) throws Exception {
+>           List list = new ArrayList<Tuple2<Integer, String>>();
+>           list.add(new Tuple3<>(input.f0,input.f1, ""));
+>           resultFuture.complete(list);
+>       }
+>   }
 >}
 >```
 >
@@ -2234,74 +2397,74 @@ https://www.51cto.com/article/587866.html
 >import java.util.Map;
 >
 >/**
-> * 这个例子是从socket中读取的流，数据为用户名称和城市id，维表是城市id、城市名称，
-> * 主流和维表关联，得到用户名称、城市id、城市名称
-> * 这个例子采用 Flink 广播流的方式来做为维度
-> **/
+>* 这个例子是从socket中读取的流，数据为用户名称和城市id，维表是城市id、城市名称，
+>* 主流和维表关联，得到用户名称、城市id、城市名称
+>* 这个例子采用 Flink 广播流的方式来做为维度
+>**/
 >public class JoinDemo4 {
 >
->    public static void main(String[] args) throws Exception {
->        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
->        //定义主流
->        DataStream<Tuple2<String, Integer>> textStream = env.socketTextStream("localhost", 9000, "\n")
->                .map(p -> {
->                    //输入格式为：user,1000,分别是用户名称和城市编号
->                    String[] list = p.split(",");
->                    return new Tuple2<String, Integer>(list[0], Integer.valueOf(list[1]));
->                })
->                .returns(new TypeHint<Tuple2<String, Integer>>() {
->                });
+>   public static void main(String[] args) throws Exception {
+>       StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+>       //定义主流
+>       DataStream<Tuple2<String, Integer>> textStream = env.socketTextStream("localhost", 9000, "\n")
+>               .map(p -> {
+>                   //输入格式为：user,1000,分别是用户名称和城市编号
+>                   String[] list = p.split(",");
+>                   return new Tuple2<String, Integer>(list[0], Integer.valueOf(list[1]));
+>               })
+>               .returns(new TypeHint<Tuple2<String, Integer>>() {
+>               });
 >
->        //定义城市流
->        DataStream<Tuple2<Integer, String>> cityStream = env.socketTextStream("localhost", 9001, "\n")
->                .map(p -> {
->                    //输入格式为：城市ID,城市名称
->                    String[] list = p.split(",");
->                    return new Tuple2<Integer, String>(Integer.valueOf(list[0]), list[1]);
->                })
->                .returns(new TypeHint<Tuple2<Integer, String>>() {
->                });
+>       //定义城市流
+>       DataStream<Tuple2<Integer, String>> cityStream = env.socketTextStream("localhost", 9001, "\n")
+>               .map(p -> {
+>                   //输入格式为：城市ID,城市名称
+>                   String[] list = p.split(",");
+>                   return new Tuple2<Integer, String>(Integer.valueOf(list[0]), list[1]);
+>               })
+>               .returns(new TypeHint<Tuple2<Integer, String>>() {
+>               });
 >
->        //将城市流定义为广播流
->        final MapStateDescriptor<Integer, String> broadcastDesc = new MapStateDescriptor("broad1", Integer.class, String.class);
->        BroadcastStream<Tuple2<Integer, String>> broadcastStream = cityStream.broadcast(broadcastDesc);
+>       //将城市流定义为广播流
+>       final MapStateDescriptor<Integer, String> broadcastDesc = new MapStateDescriptor("broad1", Integer.class, String.class);
+>       BroadcastStream<Tuple2<Integer, String>> broadcastStream = cityStream.broadcast(broadcastDesc);
 >
->        DataStream result = textStream.connect(broadcastStream)
->                .process(new BroadcastProcessFunction<Tuple2<String, Integer>, Tuple2<Integer, String>, Tuple3<String, Integer, String>>() {
->                    //处理非广播流，关联维度
->                    @Override
->                    public void processElement(Tuple2<String, Integer> value, ReadOnlyContext ctx, Collector<Tuple3<String, Integer, String>> out) throws Exception {
->                        ReadOnlyBroadcastState<Integer, String> state = ctx.getBroadcastState(broadcastDesc);
->                        String cityName = "";
->                        if (state.contains(value.f1)) {
->                            cityName = state.get(value.f1);
->                        }
->                        out.collect(new Tuple3<>(value.f0, value.f1, cityName));
->                    }
+>       DataStream result = textStream.connect(broadcastStream)
+>               .process(new BroadcastProcessFunction<Tuple2<String, Integer>, Tuple2<Integer, String>, Tuple3<String, Integer, String>>() {
+>                   //处理非广播流，关联维度
+>                   @Override
+>                   public void processElement(Tuple2<String, Integer> value, ReadOnlyContext ctx, Collector<Tuple3<String, Integer, String>> out) throws Exception {
+>                       ReadOnlyBroadcastState<Integer, String> state = ctx.getBroadcastState(broadcastDesc);
+>                       String cityName = "";
+>                       if (state.contains(value.f1)) {
+>                           cityName = state.get(value.f1);
+>                       }
+>                       out.collect(new Tuple3<>(value.f0, value.f1, cityName));
+>                   }
 >
->                    @Override
->                    public void processBroadcastElement(Tuple2<Integer, String> value, Context ctx, Collector<Tuple3<String, Integer, String>> out) throws Exception {
->                        System.out.println("收到广播数据：" + value);
->                        ctx.getBroadcastState(broadcastDesc).put(value.f0, value.f1);
->                    }
->                });
+>                   @Override
+>                   public void processBroadcastElement(Tuple2<Integer, String> value, Context ctx, Collector<Tuple3<String, Integer, String>> out) throws Exception {
+>                       System.out.println("收到广播数据：" + value);
+>                       ctx.getBroadcastState(broadcastDesc).put(value.f0, value.f1);
+>                   }
+>               });
 >
 >
->        result.print();
->        env.execute("joinDemo");
->    }
+>       result.print();
+>       env.execute("joinDemo");
+>   }
 >}
 >```
 >
 >#### [4、 Temporal table function join](http://mp.weixin.qq.com/s?__biz=MzU3MzgwNTU2Mg==&mid=2247486949&idx=1&sn=53f0e2a9430eea35ee54ca5f18ac49c5&chksm=fd3d4b70ca4ac26640a489aabec93cb331fec0782c9a7360d823ee81c405a1da97334407d3b0&scene=21#wechat_redirect)
 >
->Temporal table是持续变化表上某一时刻的视图，Temporal table function是一个表函数，传递一个时间参数，返回Temporal table这一指定时刻的视图。
+>Temporal table 是持续变化表上某一时刻的视图，Temporal table function是一个表函数，传递一个时间参数，返回Temporal table这一指定时刻的视图。
 >
 >可以将维度数据流映射为Temporal table，主流与这个Temporal table进行关联，可以关联到某一个版本（历史上某一个时刻）的维度数据。
 >
 >Temporal table function join的特点如下：
 >
->> 优点：维度数据量可以很大，维度数据更新及时，不依赖外部存储，可以关联不同版本的维度数据。缺点：只支持在Flink SQL API中使用。
+>> **优点：维度数据量可以很大，维度数据更新及时，不依赖外部存储，可以关联不同版本的维度数据。缺点：只支持在Flink SQL API中使用。**
 >
 >```java
 >package join;
@@ -2317,51 +2480,51 @@ https://www.51cto.com/article/587866.html
 >import org.apache.flink.types.Row;
 >
 >public class JoinDemo5 {
->    public static void main(String[] args) throws Exception {
->        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
->        EnvironmentSettings bsSettings = EnvironmentSettings.newInstance().useBlinkPlanner().inStreamingMode().build();
->        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, bsSettings);
+>   public static void main(String[] args) throws Exception {
+>       StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+>       EnvironmentSettings bsSettings = EnvironmentSettings.newInstance().useBlinkPlanner().inStreamingMode().build();
+>       StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, bsSettings);
 >
->        //定义主流
->        DataStream<Tuple2<String, Integer>> textStream = env.socketTextStream("localhost", 9000, "\n")
->                .map(p -> {
->                    //输入格式为：user,1000,分别是用户名称和城市编号
->                    String[] list = p.split(",");
->                    return new Tuple2<String, Integer>(list[0], Integer.valueOf(list[1]));
->                })
->                .returns(new TypeHint<Tuple2<String, Integer>>() {
->                });
+>       //定义主流
+>       DataStream<Tuple2<String, Integer>> textStream = env.socketTextStream("localhost", 9000, "\n")
+>               .map(p -> {
+>                   //输入格式为：user,1000,分别是用户名称和城市编号
+>                   String[] list = p.split(",");
+>                   return new Tuple2<String, Integer>(list[0], Integer.valueOf(list[1]));
+>               })
+>               .returns(new TypeHint<Tuple2<String, Integer>>() {
+>               });
 >
->        //定义城市流
->        DataStream<Tuple2<Integer, String>> cityStream = env.socketTextStream("localhost", 9001, "\n")
->                .map(p -> {
->                    //输入格式为：城市ID,城市名称
->                    String[] list = p.split(",");
->                    return new Tuple2<Integer, String>(Integer.valueOf(list[0]), list[1]);
->                })
->                .returns(new TypeHint<Tuple2<Integer, String>>() {
->                });
+>       //定义城市流
+>       DataStream<Tuple2<Integer, String>> cityStream = env.socketTextStream("localhost", 9001, "\n")
+>               .map(p -> {
+>                   //输入格式为：城市ID,城市名称
+>                   String[] list = p.split(",");
+>                   return new Tuple2<Integer, String>(Integer.valueOf(list[0]), list[1]);
+>               })
+>               .returns(new TypeHint<Tuple2<Integer, String>>() {
+>               });
 >
->        //转变为Table
->        Table userTable = tableEnv.fromDataStream(textStream, "user_name,city_id,ps.proctime");
->        Table cityTable = tableEnv.fromDataStream(cityStream, "city_id,city_name,ps.proctime");
+>       //转变为Table
+>       Table userTable = tableEnv.fromDataStream(textStream, "user_name,city_id,ps.proctime");
+>       Table cityTable = tableEnv.fromDataStream(cityStream, "city_id,city_name,ps.proctime");
 >
->        //定义一个TemporalTableFunction
->        TemporalTableFunction dimCity = cityTable.createTemporalTableFunction("ps", "city_id");
->        //注册表函数
->        tableEnv.registerFunction("dimCity", dimCity);
+>       //定义一个TemporalTableFunction
+>       TemporalTableFunction dimCity = cityTable.createTemporalTableFunction("ps", "city_id");
+>       //注册表函数
+>       tableEnv.registerFunction("dimCity", dimCity);
 >
->        //关联查询
->        Table result = tableEnv
->                .sqlQuery("select u.user_name,u.city_id,d.city_name from " + userTable + " as u " +
->                        ", Lateral table (dimCity(u.ps)) d " +
->                        "where u.city_id=d.city_id");
+>       //关联查询
+>       Table result = tableEnv
+>               .sqlQuery("select u.user_name,u.city_id,d.city_name from " + userTable + " as u " +
+>                       ", Lateral table (dimCity(u.ps)) d " +
+>                       "where u.city_id=d.city_id");
 >
->        //打印输出
->        DataStream resultDs = tableEnv.toAppendStream(result, Row.class);
->        resultDs.print();
->        env.execute("joinDemo");
->    }
+>       //打印输出
+>       DataStream resultDs = tableEnv.toAppendStream(result, Row.class);
+>       resultDs.print();
+>       env.execute("joinDemo");
+>   }
 >}
 >```
 >
@@ -2385,71 +2548,71 @@ https://www.51cto.com/article/587866.html
 >import java.util.List;
 >
 >public class JoinDemo9 {
->    public static void main(String[] args) throws Exception {
->        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
->        //指定是EventTime
->        env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
->        EnvironmentSettings bsSettings = EnvironmentSettings.newInstance().useBlinkPlanner().inStreamingMode().build();
->        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, bsSettings);
->        env.setParallelism(1);
+>   public static void main(String[] args) throws Exception {
+>       StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+>       //指定是EventTime
+>       env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
+>       EnvironmentSettings bsSettings = EnvironmentSettings.newInstance().useBlinkPlanner().inStreamingMode().build();
+>       StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, bsSettings);
+>       env.setParallelism(1);
 >
->        //主流，用户流, 格式为：user_name、city_id、ts
->        List<Tuple3<String, Integer, Long>> list1 = new ArrayList<>();
->        list1.add(new Tuple3<>("user1", 1001, 1L));
->        list1.add(new Tuple3<>("user1", 1001, 10L));
->        list1.add(new Tuple3<>("user2", 1002, 2L));
->        list1.add(new Tuple3<>("user2", 1002, 15L));
->        DataStream<Tuple3<String, Integer, Long>> textStream = env.fromCollection(list1)
->                .assignTimestampsAndWatermarks(
->                        //指定水位线、时间戳
->                        new BoundedOutOfOrdernessTimestampExtractor<Tuple3<String, Integer, Long>>(Time.seconds(10)) {
->                            @Override
->                            public long extractTimestamp(Tuple3<String, Integer, Long> element) {
->                                return element.f2;
->                            }
->                        }
->                );
+>       //主流，用户流, 格式为：user_name、city_id、ts
+>       List<Tuple3<String, Integer, Long>> list1 = new ArrayList<>();
+>       list1.add(new Tuple3<>("user1", 1001, 1L));
+>       list1.add(new Tuple3<>("user1", 1001, 10L));
+>       list1.add(new Tuple3<>("user2", 1002, 2L));
+>       list1.add(new Tuple3<>("user2", 1002, 15L));
+>       DataStream<Tuple3<String, Integer, Long>> textStream = env.fromCollection(list1)
+>               .assignTimestampsAndWatermarks(
+>                       //指定水位线、时间戳
+>                       new BoundedOutOfOrdernessTimestampExtractor<Tuple3<String, Integer, Long>>(Time.seconds(10)) {
+>                           @Override
+>                           public long extractTimestamp(Tuple3<String, Integer, Long> element) {
+>                               return element.f2;
+>                           }
+>                       }
+>               );
 >
->        //定义城市流,格式为：city_id、city_name、ts
->        List<Tuple3<Integer, String, Long>> list2 = new ArrayList<>();
->        list2.add(new Tuple3<>(1001, "beijing", 1L));
->        list2.add(new Tuple3<>(1001, "beijing2", 10L));
->        list2.add(new Tuple3<>(1002, "shanghai", 1L));
->        list2.add(new Tuple3<>(1002, "shanghai2", 5L));
+>       //定义城市流,格式为：city_id、city_name、ts
+>       List<Tuple3<Integer, String, Long>> list2 = new ArrayList<>();
+>       list2.add(new Tuple3<>(1001, "beijing", 1L));
+>       list2.add(new Tuple3<>(1001, "beijing2", 10L));
+>       list2.add(new Tuple3<>(1002, "shanghai", 1L));
+>       list2.add(new Tuple3<>(1002, "shanghai2", 5L));
 >
->        DataStream<Tuple3<Integer, String, Long>> cityStream = env.fromCollection(list2)
->                .assignTimestampsAndWatermarks(
->                        //指定水位线、时间戳
->                        new BoundedOutOfOrdernessTimestampExtractor<Tuple3<Integer, String, Long>>(Time.seconds(10)) {
->                            @Override
->                            public long extractTimestamp(Tuple3<Integer, String, Long> element) {
->                                return element.f2;
->                            }
->                        });
+>       DataStream<Tuple3<Integer, String, Long>> cityStream = env.fromCollection(list2)
+>               .assignTimestampsAndWatermarks(
+>                       //指定水位线、时间戳
+>                       new BoundedOutOfOrdernessTimestampExtractor<Tuple3<Integer, String, Long>>(Time.seconds(10)) {
+>                           @Override
+>                           public long extractTimestamp(Tuple3<Integer, String, Long> element) {
+>                               return element.f2;
+>                           }
+>                       });
 >
->        //转变为Table
->        Table userTable = tableEnv.fromDataStream(textStream, "user_name,city_id,ts.rowtime");
->        Table cityTable = tableEnv.fromDataStream(cityStream, "city_id,city_name,ts.rowtime");
+>       //转变为Table
+>       Table userTable = tableEnv.fromDataStream(textStream, "user_name,city_id,ts.rowtime");
+>       Table cityTable = tableEnv.fromDataStream(cityStream, "city_id,city_name,ts.rowtime");
 >
->        tableEnv.createTemporaryView("userTable", userTable);
->        tableEnv.createTemporaryView("cityTable", cityTable);
+>       tableEnv.createTemporaryView("userTable", userTable);
+>       tableEnv.createTemporaryView("cityTable", cityTable);
 >
->        //定义一个TemporalTableFunction
->        TemporalTableFunction dimCity = cityTable.createTemporalTableFunction("ts", "city_id");
->        //注册表函数
->        tableEnv.registerFunction("dimCity", dimCity);
+>       //定义一个TemporalTableFunction
+>       TemporalTableFunction dimCity = cityTable.createTemporalTableFunction("ts", "city_id");
+>       //注册表函数
+>       tableEnv.registerFunction("dimCity", dimCity);
 >
->        //关联查询
->        Table result = tableEnv
->                .sqlQuery("select u.user_name,u.city_id,d.city_name,u.ts from userTable as u " +
->                        ", Lateral table (dimCity(u.ts)) d " +
->                        "where u.city_id=d.city_id");
+>       //关联查询
+>       Table result = tableEnv
+>               .sqlQuery("select u.user_name,u.city_id,d.city_name,u.ts from userTable as u " +
+>                       ", Lateral table (dimCity(u.ts)) d " +
+>                       "where u.city_id=d.city_id");
 >
->        //打印输出
->        DataStream resultDs = tableEnv.toAppendStream(result, Row.class);
->        resultDs.print();
->        env.execute("joinDemo");
->    }
+>       //打印输出
+>       DataStream resultDs = tableEnv.toAppendStream(result, Row.class);
+>       resultDs.print();
+>       env.execute("joinDemo");
+>   }
 >}
 >```
 >
@@ -2501,7 +2664,7 @@ flink1.8 之前，flink版本里面加上了 hadoop 版本的支持。
 
 
 
-## CEP 复杂事件处理？？？
+## CEP 复杂事件处理
 
 
 
@@ -2512,7 +2675,6 @@ flink1.8 之前，flink版本里面加上了 hadoop 版本的支持。
 https://zhuanlan.zhihu.com/p/434562109
 
 >Flink 和 hive 的集成。
->
 >
 
 ## flink keyBy 的原理
@@ -2560,6 +2722,7 @@ org.apache.flink.streaming.runtime.partitioner.KeyGroupStreamPartitioner#selectC
      * @param maxParallelism the maximum supported parallelism, aka the number of key-groups.
      * @return the key-group to which the given key is assigned
      */
+      // keyHash 是由 key 的object 对象调用 hashcode() 方法得到的，因此整个大概流程为：murmurHash(key.hashcode()) % maxParallelism * (parallelism / maxParallelism)
     public static int computeKeyGroupForKeyHash(int keyHash, int maxParallelism) {
         return MathUtils.murmurHash(keyHash) % maxParallelism;
     }
@@ -2581,7 +2744,7 @@ https://matt33.com/categories/%E6%8A%80%E6%9C%AF/
 
 http://matt33.com/2020/03/15/flink-taskmanager-7/
 
->启动类 TaskManagerRunner 的启动流程：
+>启动类 TaskManagerRunner 的启动流程：(主要启动了两个模块: **TaskManagerServices（管理） 和 TaskExcutor（执行）**)
 >
 >![image-20220521122515560](flink_note.assets/image-20220521122515560.png)
 >
@@ -2617,10 +2780,10 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 >这里，主要分为两个部分：
 >
 >1. `startTaskExecutorServices()`: 启动 TaskManager 相关的服务，结合流程图主要是四大块：
->   - 启动心跳服务；
->   - 向 Flink Master 的 ResourceManager 注册 TaskManager；
->   - 启动 TaskSlotTable 服务（TaskSlot 的维护主要在这个服务中）；
->   - 启动 JobLeaderService 服务，它主要是监控各个作业 JobManager leader 的变化；
+>   - **启动心跳服务；**
+>   - **向 Flink Master 的 ResourceManager 注册 TaskManager；**
+>   - **启动 TaskSlotTable 服务（TaskSlot 的维护主要在这个服务中）；**
+>   - **启动 JobLeaderService 服务，它主要是监控各个作业 JobManager leader 的变化**
 >2. `startRegistrationTimeout()`: 启动注册超时的检测，默认是5 min，如果超过这个时间还没注册完成，就会抛出异常退出进程，启动失败。
 >
 >TaskExecutor 启动的核心实现是在 `startTaskExecutorServices()` 中，其实现如下：
@@ -2761,9 +2924,9 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 >
 >TaskSlotTable 从名字也可以看出，它主要是为 TaskSlot 服务的，它主要的功能有以下三点：
 >
->1. 维护这个 TM 上所有 TaskSlot 与 Task、及 Job 的关系；
->2. 维护这个 TM 上所有 TaskSlot 的状态；
->3. TaskSlot 在进行 allocate/free 操作，通过 **TimeService** 做超时检测。
+>1. **维护这个 TM 上所有 TaskSlot 与 Task、及 Job 的关系；**
+>2. **维护这个 TM 上所有 TaskSlot 的状态；**
+>3. **TaskSlot 在进行 allocate/free 操作，通过 TimeService 做超时检测。**
 >
 >先看下 TaskSlotTable 是如何初始化的：
 >
@@ -2894,7 +3057,7 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 >3. **checkpoint 相关的处理；**
 >4. **心跳监控、连接建立等。**
 >
->通常，可以任务 TaskManager 提供的功能主要是前三点，如下图所示：
+>通常，可以任务 TaskManager 提供的功能主要是前三点（**重要**），如下图所示：
 >
 >**![image-20220521162803213](flink_note.assets/image-20220521162803213.png)**
 >
@@ -2904,7 +3067,7 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 >
 >这里，我们以使用 Zookeeper 模式的情况来讲述，ZooKeeper 做 HA 是业内最常用的方案，Flink 在实现并没有使用 `ZkClient` 这个包，而是使用 `curator` 来做的（有兴趣可以看下这篇文章 [跟着实例学习ZooKeeper的用法： 缓存](https://colobu.com/2014/12/15/zookeeper-recipes-by-example-5/)）。
 >
->关于 Flink HA 的使用，可以参考官方文档——[JobManager High Availability (HA)](https://ci.apache.org/projects/flink/flink-docs-stable/ops/jobmanager_high_availability.html)。这里 TaskExecutor 在注册完 `ResourceManagerLeaderListener` 后，如果 leader 被选举出来或者有节点有变化，就通过它的 `notifyLeaderAddress()` 方法来通知 TaskExecutor，核心还是利用了 ZK 的 watcher 机制。同理， JobManager leader 的处理也是一样。
+>**关于 Flink HA 的使用，可以参考官方文档——[JobManager High Availability (HA)](https://ci.apache.org/projects/flink/flink-docs-stable/ops/jobmanager_high_availability.html)。这里 TaskExecutor 在注册完 `ResourceManagerLeaderListener` 后，如果 leader 被选举出来或者有节点有变化，就通过它的 `notifyLeaderAddress()` 方法来通知 TaskExecutor，核心还是利用了 ZK 的 watcher 机制。同理， JobManager leader 的处理也是一样。**
 >
 >## TM Slot 资源是如何管理的？
 >
@@ -3043,6 +3206,30 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 
 ## [Flink 类型和序列化机制简介](https://cloud.tencent.com/developer/article/1240444)
 
+>## TypeExtractror 类型提取
+>
+>Flink 内部实现了名为 **TypeExtractror** 的类，可以利用方法签名、子类信息等蛛丝马迹，**自动提取和恢复类型信息（当然也可以显式声明，即本文所介绍的内容）。**
+>
+>然而由于 Java 的类型擦除，自动提取并不是总是有效。因而一些情况下（例如通过 URLClassLoader 动态加载的类），仍需手动处理；例如下图中对 DataSet 变换时，使用 .returns() 方法声明返回类型。
+>
+>这里需要说明一下，returns() 接受三种类型的参数：**字符串描述的类名（例如 "String"）、TypeHint（接下来会讲到，用于泛型类型参数）、Java 原生 Class（例如 String.class) 等；**不过字符串形式的用法即将废弃，如果确实有必要，请使用 Class.forName() 等方法来解决。
+>
+>![img](flink_note.assets/7000-20230319150905167.png)
+>
+>图 3：使用 .returns 方法声明返回类型
+>
+>下面是 ExecutionEnvironment 类的 registerType 方法，它可以向 Flink 注册子类信息（Flink 认识父类，但不一定认识子类的一些独特特性，因而需要注册），下面是 Flink-ML 机器学习库代码的例子：
+>
+>![img](flink_note.assets/7000-20230319150905162.png)
+>
+>图 4：Flink-ML 注册子类类型信息
+>
+>从下图可以看到，如果通过 TypeExtractor.createTypeInfo(type) 方法获取到的类型信息属于 PojoTypeInfo 及其子类，那么将其注册到一起；否则统一交给 Kryo 去处理，Flink 并不过问（这种情况下性能会变差）。
+>
+>![img](flink_note.assets/7000.png)
+>
+>图 5：Flink 允许注册自定义类型
+>
 >## 声明类型信息的常见手段
 >
 >通过 TypeInformation.of() 方法，可以简单地创建类型信息对象。
@@ -3097,7 +3284,7 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 >
 >## Kryo 序列化
 >
->对于 Flink 无法序列化的类型（例如用户自定义类型，没有 registerType，也没有自定义 TypeInfo 和 TypeInfoFactory），默认会交给 Kryo 处理。
+>**对于 Flink 无法序列化的类型（例如用户自定义类型，没有 registerType，也没有自定义 TypeInfo 和 TypeInfoFactory），默认会交给 Kryo 处理。**
 >
 >如果 Kryo 仍然无法处理（例如 Guava、Thrift、Protobuf 等第三方库的一些类），有以下两种解决方案：
 >
@@ -3107,10 +3294,10 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 >env.getConfig().enableForceAvro();   // env 代表 ExecutionEnvironment 对象, 下同
 >```
 >
->2. 为 Kryo 增加自定义的 Serializer 以增强 Kryo 的功能：
+>2. **为 Kryo 增加自定义的 Serializer 以增强 Kryo 的功能：**
 >
->```js
-> env.getConfig().addDefaultKryoSerializer(Class<?> type, Class<? extends Serializer<?>> serializerClass
+>```java
+>env.getConfig().addDefaultKryoSerializer(Class<?> type, Class<? extends Serializer<?>> serializerClass)
 >```
 >
 >![img](flink_note.assets/1620-20220612002112737.png)图 14：为 Kryo 增加自定义的 Serializer
@@ -3125,7 +3312,7 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 >
 >图 15：为 Kryo 增加自定义的 Serializer
 >
->如果希望完全禁用 Kryo（100% 使用 Flink 的序列化机制），则可以使用以下设置，但注意一切无法处理的类都将导致异常：
+>**如果希望完全禁用 Kryo（100% 使用 Flink 的序列化机制），则可以使用以下设置，但注意一切无法处理的类都将导致异常：**
 >
 >```js
 >env.getConfig().disableGenericTypes();
@@ -3133,7 +3320,9 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 >
 >## 类型机制与内存管理
 >
->![img](https://ask.qcloudimg.com/draft/1207538/zsof9qw1mg.png?imageView2/2/w/1620)图 16：类型信息到内存块
+>![img](https://ask.qcloudimg.com/draft/1207538/zsof9qw1mg.png?imageView2/2/w/1620)
+>
+>图 16：类型信息到内存块
 
 ## [FLINK 中AggregateFunction里面的四个方法中的merge方法是做什么用的？](https://www.zhihu.com/question/346639699)
 
@@ -3144,11 +3333,11 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 >
 >AggregateFunction中的merge方法仅SessionWindow会调用该方法，如果time window是不会调用的，merge方法即使返回null也是可以的。可以看看官方的文档中的描述和结合翻看源码就可以搞清楚了
 >
->![img](flink_note.assets/v2-4ea9c13a79aa854ddd6cf0a458472406_720w-20220414163407768.jpg)![img](flink_note.assets/v2-4ea9c13a79aa854ddd6cf0a458472406_720w.jpg)
+>![img](flink_note.assets/v2-4ea9c13a79aa854ddd6cf0a458472406_r.jpg)
 >
 >官网中的描述大概的意思是：因为会话窗口没有固定的起始时间和结束时间，他们被运算不同于滚动窗口和滑动窗口。**本质上，会话窗口会为每一批相邻两条数据没有大于指定间隔时间的数据merge到以一起。**为了数据能够被merge，会话窗口需要一个merge的触发器和一个可以merge的WindowFunction，比如ReduceFunction、AggregateFunction或者ProcessWindowFunction，需要注意的是FoldFunction不能merge！
 >
->只有SessionWindow才会调用AggregateFunction的merge方法！！！
+>**只有SessionWindow才会调用AggregateFunction的merge方法！！！**
 
 ## [从AggregateFunction.merge()到Flink会话窗口实现原理](https://blog.csdn.net/nazeniwaresakini/article/details/108576534)
 
@@ -3158,11 +3347,25 @@ http://matt33.com/2020/03/15/flink-taskmanager-7/
 
 
 
-## 从源码看项目中flink processfunction调用过程 ？？
+## 从源码看项目中flink processfunction调用过程 
 
 https://zhuanlan.zhihu.com/p/90721680
 
+>我们知道flink已经封装了很多高级的api供用户访问使用，但是有时候我们可能根据不同的需求，发现提供的高级api不能满足我们的需求，**这个时候flink也为我们提供了low-level层面的api,比如processFunction,通过processFunction函数，我们可以访问state,进行注册process ，event time定时器来帮助我们完成一项复杂的操作。在我们使用process 函数的时候，有一个前提就是要求我们必须使用在keyedStream上，有两个原因，一个是getRuntimeContext 得到的StreamingRuntimeContext 只提供了KeyedStateStore的访问权限，所以只能访问keyd state，另外一个是我们在注册定时器的时候，需要有三个维度，namespace，key,time，所以要求我们有key,这就是在ProcessFunction中只能在keyedStream做定时器注册，在flink1.8.0版本中，有ProcessFunction 和KeyedProcessFunction 这个类面向用户的api,但是在ProcessFunction 类我们无法注册定时器，**在ProcessOperator源码中我们发现注册是抛出异常
 >
+>```java
+>		@Override
+>		public void registerProcessingTimeTimer(long time) {
+>			throw new UnsupportedOperationException(UNSUPPORTED_REGISTER_TIMER_MSG);
+>		}
+>
+>		@Override
+>		public void registerEventTimeTimer(long time) {
+>			throw new UnsupportedOperationException(UNSUPPORTED_REGISTER_TIMER_MSG);
+>		}
+>```
+>
+>所以我们使用KeyedProcessFunction这个类来完成定时功能。
 >
 >
 
@@ -3205,6 +3408,18 @@ https://zhuanlan.zhihu.com/p/90721680
 
 ## [深度解读：Flink 1.11 SQL流批一体的增强与完善](https://cloud.tencent.com/developer/news/661653)
 
+>7月6日，Apache Flink 1.11 正式发布。从3月初进行功能规划到7月初正式发版，1.11 用将近4个月的时间重点优化了 Flink 的易用性问题，提升用户的生产使用体验。
+>
+>SQL 作为 Flink 中公认的核心模块之一，对推动 Flink 流批一体功能的完善至关重要。在 1.11 中，Flink SQL 也进行了大量的增强与完善，开发大功能 10 余项，不仅扩大了应用场景，还简化了流程，上手操作更简单。
+>
+>其中，值得注意的改动包括：
+>
+>-  **默认 Planner 已经切到 Blink planner 上。** 
+>-  **引入了对 CDC（Change Data Capture，变动数据捕获）的支持，用户仅用几句简单的 SQL 即可对接 Debezium 和 Canal 的数据源。** 
+>-  **离线数仓实时化，用户可方便地使用 SQL 将流式数据从 Kafka 写入 Hive 等。** 
+>
+>
+
 ## [Flink算子使用方法及实例演示：keyBy、reduce和aggregations](https://zhuanlan.zhihu.com/p/98975650)
 
 >`keyBy`算子将`DataStream`转换成一个`KeyedStream`。`KeyedStream`是一种特殊的`DataStream`，事实上，`KeyedStream`继承了`DataStream`，`DataStream`的各元素随机分布在各Task Slot中，`KeyedStream`的各元素按照Key分组，分配到各Task Slot中。我们需要向`keyBy`算子传递一个参数，以告知Flink以什么字段作为Key进行分组。
@@ -3214,6 +3429,56 @@ https://zhuanlan.zhihu.com/p/90721680
 >注意，**对于一个`KeyedStream`,一次只能使用一个aggregation操作，无法链式使用多个。**
 
 ## [Apache Flink 漫谈系列 - 双流JOIN](https://mp.weixin.qq.com/s/BiO4Ba6wRH4tlTdT2w7fzw)
+
+> # Flink双流JOIN的支持
+>
+> |       | CROSS JOIN | INNER JOIN | OUTER JOIN | SELF JOIN | ON(condition) | WHERE |
+> | ----- | ---------- | ---------- | ---------- | --------- | ------------- | ----- |
+> | Flink | N          | Y          | Y          | Y         | 必选          | 可选  |
+>
+> Flink 目前支持 INNER JOIN和LEFT OUTER JOIN（SELF 可以转换为普通的INNER和OUTER)。在语义上面Flink严格遵守标准SQL的语义，与上面演示的语义一致。下面我重点介绍Flink中JOIN的实现原理。
+>
+> ## 双流JOIN与传统数据库表JOIN的区别
+>
+> 传统数据库表的JOIN是静态两张静态表的数据联接，在流上面是 动态表，双流JOIN的数据不断流入与传统数据库表的JOIN有如下3个核心区别：
+>
+> - **左右两边的数据集合无穷** - 传统数据库左右两个表的数据集合是有限的，双流JOIN的数据会源源不断的流入；
+> - **JOIN的结果不断产生/更新** - 传统数据库表JOIN是一次执行产生最终结果后退出，双流JOIN会持续不断的产生新的结果。
+> - **查询计算的双边驱动** - 双流JOIN由于左右两边的流的速度不一样，会导致左边数据到来的时候右边数据还没有到来，或者右边数据到来的时候左边数据没有到来，所以**在实现中要将左右两边的流数据进行保存，以保证JOIN的语义。在Flink中会以State的方式进行数据的存储。**
+>
+> ## 数据Shuffle
+>
+> 分布式流计算所有数据会进行Shuffle，怎么才能保障左右两边流的要JOIN的数据会在相同的节点进行处理呢？在双流JOIN的场景，我们会利用JOIN中ON的联接key进行partition，确保两个流相同的联接key会在同一个节点处理。
+>
+> ## 数据的保存
+>
+> 不论是INNER JOIN还是OUTER JOIN 都需要对左右两边的流的数据进行保存，JOIN算子会开辟左右两个State进行数据存储，左右两边的数据到来时候，进行如下操作：
+>
+> - LeftEvent到来存储到LState，RightEvent到来的时候存储到RState；
+> - LeftEvent会去RightState进行JOIN，并发出所有JOIN之后的Event到下游；
+> - RightEvent会去LeftState进行JOIN，并发出所有JOIN之后的Event到下游
+>
+> # 双流JOIN的应用优化
+>
+> NULL造成的热点
+>
+> 比如我们有A LEFT JOIN  B ON A.aCol = B.bCol LEFT JOIN  C ON B.cCol = C.cCol 的业务，JOB的DAG如下：
+>
+> ![Image](flink_note.assets/640.png)
+>
+> 假设在实际业务中有这这样的特点，大部分时候当A事件流入的时候，B还没有可以JION的数据，但是B来的时候，A已经有可以JOIN的数据了，这特点就会导致，A LEFT JOIN B 会产生大量的 (A, NULL),其中包括B里面的 cCol 列也是NULL，这时候当与C进行LEFT JOIN的时候，首先Flink内部会利用cCol对AB的JOIN产生的事件流进行Shuffle， cCol是NULL进而是下游节点大量的NULL事件流入，造成热点。那么这问题如何解决呢？
+>
+> 我们可以改变JOIN的先后顺序，来保证A LEFT JOIN B 不会产生NULL的热点问题，如下：
+>
+> ![Image](flink_note.assets/640-20230319201426304.png)
+>
+> 
+>
+> ## JOIN ReOrder
+>
+> 对于JOIN算子的实现我们知道左右两边的事件都会存储到State中，在流入事件时候在从另一边读取所有事件进行JOIN计算，这样的实现逻辑在数据量很大的场景会有一定的state操作瓶颈，我们某些场景可以通过业务角度调整JOIN的顺序，来消除性能呢瓶颈，比如：A JOIN B ON A.acol = B.bcol  JOIN  C ON B.bcol = C.ccol. 这样的场景，如果 A与B进行JOIN产生数据量很大，但是B与C进行JOIN产生的数据量很小，那么我们可以强制调整JOIN的联接顺序，B JOIN C ON b.bcol = c.ccol JOIN A ON a.acol = b.bcol. 如下示意图：
+>
+> ![Image](flink_note.assets/640-20230319201426287.png)
 
 ## [Flink算子使用方法及实例演示：union和connect](https://juejin.im/post/6844904031677218829)
 
@@ -3253,17 +3518,47 @@ https://zhuanlan.zhihu.com/p/90721680
 
 ## [Flink 原理与实现：Window 机制](http://wuchong.me/blog/2016/05/25/flink-internals-window-mechanism/)
 
->翻滚计数窗口并不带evictor，只注册了一个trigger。该trigger是带purge功能的 CountTrigger。也就是说每当窗口中的元素数量达到了 window-size，trigger就会返回fire+purge，窗口就会执行计算并清空窗口中的所有元素，再接着储备新的元素。从而实现了tumbling的窗口之间无重叠。
+>翻滚计数窗口并不带 evictor，只注册了一个trigger。该trigger是带purge功能的 CountTrigger。也就是说每当窗口中的元素数量达到了 window-size，trigger就会返回fire+purge，窗口就会执行计算并清空窗口中的所有元素，再接着储备新的元素。从而实现了tumbling的窗口之间无重叠。
 >
 >滑动计数窗口的各窗口之间是有重叠的，但我们用的 GlobalWindows assinger 从始至终只有一个窗口，不像 sliding time assigner 可以同时存在多个窗口。所以trigger结果不能带purge，也就是说计算完窗口后窗口中的数据要保留下来（供下个滑窗使用）。另外，trigger的间隔是slide-size，evictor的保留的元素个数是window-size。也就是说，每个滑动间隔就触发一次窗口计算，并保留下最新进入窗口的window-size个元素，剔除旧元素。
+>
+>## Window 的实现
+>
+>**下图描述了 Flink 的窗口机制以及各组件之间是如何相互工作的。**
+>
+>![image-20230319204140879](flink_note.assets/image-20230319204140879.png)
+>
+>首先上图中的组件都位于一个算子（window operator）中，数据流源源不断地进入算子，每一个到达的元素都会被交给 **WindowAssigner**。WindowAssigner 会决定元素被放到哪个或哪些窗口（window），可能会创建新窗口。因为一个元素可以被放入多个窗口中，所以同时存在多个窗口是可能的。注意，`Window`本身只是一个ID标识符，其内部可能存储了一些元数据，如`TimeWindow`中有开始和结束时间，但是并不会存储窗口中的元素。**窗口中的元素实际存储在 Key/Value State 中，key为`Window`，value为元素集合（或聚合值）**。**为了保证窗口的容错性，该实现依赖了 Flink 的 State 机制**（参见 [state 文档](https://ci.apache.org/projects/flink/flink-docs-master/apis/streaming/state.html)）。
+>
+>每一个窗口都拥有一个属于自己的 Trigger，Trigger上会有定时器，用来决定一个窗口何时能够被计算或清除。**每当有元素加入到该窗口，或者之前注册的定时器超时了，那么Trigger都会被调用**。**Trigger的返回结果可以是 continue（不做任何操作），fire（处理窗口数据），purge（移除窗口和窗口中的数据），或者 fire + purge。一个Trigger的调用结果只是fire的话，那么会计算窗口并保留窗口原样，也就是说窗口中的数据仍然保留不变，等待下次Trigger fire的时候再次执行计算。一个窗口可以被重复计算多次知道它被 purge 了。在purge之前，窗口会一直占用着内存。**
+>
+>当Trigger fire了，窗口中的元素集合就会交给`Evictor`（如果指定了的话）。Evictor 主要用来遍历窗口中的元素列表，并决定最先进入窗口的多少个元素需要被移除。剩余的元素会交给用户指定的函数进行窗口的计算。如果没有 Evictor 的话，窗口中的所有元素会一起交给函数进行计算。
+>
+>计算函数收到了窗口的元素（可能经过了 Evictor 的过滤），并计算出窗口的结果值，并发送给下游。窗口的结果值可以是一个也可以是多个。DataStream API 上可以接收不同类型的计算函数，包括预定义的`sum()`,`min()`,`max()`，还有 `ReduceFunction`，`FoldFunction`，还有`WindowFunction`。WindowFunction 是最通用的计算函数，其他的预定义的函数基本都是基于该函数实现的。
+>
+>**Flink 对于一些聚合类的窗口计算（如sum,min）做了优化，因为聚合类的计算不需要将窗口中的所有数据都保存下来，只需要保存一个result值就可以了。每个进入窗口的元素都会执行一次聚合函数并修改result值。这样可以大大降低内存的消耗并提升性能。**但是如果用户定义了 Evictor，则不会启用对聚合窗口的优化，因为 Evictor 需要遍历窗口中的所有元素，必须要将窗口中所有元素都存下来。
 
-## [Flink dynamic table转成stream实战](https://www.jianshu.com/p/c352d0c4a458)
+## [Flink dynamic table转成stream实战](https://www.jianshu.com/p/c352d0c4a458) （很详细、案例清晰）
 
 >## Append-only stream
 >
+>A dynamic table that is only modified by INSERT changes can be converted into a stream by emitting the inserted rows.
+>
+>也就是说如果*dynamic table*只包含了插入新数据的操作那么就可以转化为*append-only stream*，所有数据追加到stream里面。
+>
 >## Retract stream
 >
+>A retract stream is a stream with two types of messages, add messages and retract messages.  A dynamic table is converted into an retract stream by encoding an INSERT change as add message, a DELETE change as retract message, and an UPDATE change as a retract message for the updated (previous) row and an add message for the updating (new) row. The following figure visualizes the conversion of a dynamic table into a retract stream.
+>
 >## Upsert stream
+>
+>An upsert stream is a stream with two types of messages, upsert messages and delete messages. A dynamic table that is converted into an upsert stream requires a (possibly composite) unique key. A dynamic table with unique key is converted into a stream by encoding INSERT and UPDATE changes as upsert messages and DELETE changes as delete messages. The stream consuming operator needs to be aware of the unique key attribute in order to apply messages correctly. The main difference to a retract stream is that UPDATE changes are encoded with a single message and hence more efficient. The following figure visualizes the conversion of a dynamic table into an upsert stream.
+>
+>![image-20230319211642286](flink_note.assets/image-20230319211642286.png)
+>
+>这个模式和以上两个模式不同的地方在于要实现将Dynamic table转化成Upsert stream需要实现一个UpsertStreamTableSink，而不能直接使用`StreamTableEnvironment`进行转换。
+>
+>这种模式的返回值也是一个`Tuple2<Boolean, T>`类型，和Retract的区别在于更新表中的某条数据并不会返回一条删除旧数据一条插入新数据，而是看上去真的是更新了某条数据。
 >
 >## Upsert stream番外篇??
 >
@@ -3271,15 +3566,13 @@ https://zhuanlan.zhihu.com/p/90721680
 >
 >```java
 >String sql = "SELECT user, cnt " +
->        "FROM (" +
->               "SELECT user,COUNT(url) as cnt FROM clicks GROUP BY user" +
->                   ")" +
->             "ORDER BY cnt LIMIT 2";
->     ```
->     
+>   "FROM (" +
+>          "SELECT user,COUNT(url) as cnt FROM clicks GROUP BY user" +
+>              ")" +
+>        "ORDER BY cnt LIMIT 2";
+>```
+>
 >返回结果：
->
->
 >
 >```shell
 >send message:(true,(Mary,1))
@@ -3297,18 +3590,18 @@ https://zhuanlan.zhihu.com/p/90721680
 >具体的原理可以查看源码，`org.apache.flink.table.planner.plan.nodes.physical.stream.StreamExecRank`和`org.apache.flink.table.planner.plan.nodes.physical.stream.StreamExecSortLimit`
 >解析sql的时候通过下面的方法得到不同的strategy，由此影响是否需要删除原有数据的行为。
 >
-> 
+>
 >
 >```scala
 >def getStrategy(forceRecompute: Boolean = false): RankProcessStrategy = {
 >if (strategy == null || forceRecompute) {
->   strategy = RankProcessStrategy.analyzeRankProcessStrategy(
->       inputRel, ImmutableBitSet.of(), sortCollation, cluster.getMetadataQuery)
->     }
->     strategy
->    }
->    ```
->  
+>strategy = RankProcessStrategy.analyzeRankProcessStrategy(
+>  inputRel, ImmutableBitSet.of(), sortCollation, cluster.getMetadataQuery)
+>}
+>strategy
+>}
+>```
+>
 >知道什么时候会产生false属性的数据，对于理解`JDBCUpsertTableSink`和`HBaseUpsertTableSink`的使用会有很大的帮助。
 
 
@@ -3483,6 +3776,14 @@ https://zhuanlan.zhihu.com/p/90721680
 
 ## h3 [flink的 memorysegment](https://blog.csdn.net/zhoucs86/article/details/91049219)（全面、重要）
 
+> ## 直接序列化对象的缺点
+>
+> 大数据领域的开源框架（[Hadoop](https://so.csdn.net/so/search?q=Hadoop&spm=1001.2101.3001.7020)，Spark，Storm）都使用的 JVM，当然也包括 Flink。基于 JVM 的数据分析引擎都需要面对将大量数据存到内存中，这就不得不面对 JVM 存在的几个问题：
+>
+> 1. **Java 对象存储密度低。**一个只包含 boolean 属性的对象占用了16个字节内存：对象头占了8个，boolean 属性占了1个，对齐填充占了7个。而实际上只需要一个bit（1/8字节）就够了。
+> 2. **Full GC 会极大地影响性能，尤其是为了处理更大数据而开了很大内存空间的JVM来说，GC 会达到秒级甚至分钟级。**
+> 3. **OOM 问题影响稳定性。**OutOfMemoryError 是分布式计算框架经常会遇到的问题，当JVM中所有对象大小超过分配给JVM的内存大小时，就会发生 OutOfMemoryError 错误，导致JVM崩溃，分布式框架的健壮性和性能都会受到影响。
+>
 > ## 积极的内存管理
 >
 > **Flink 并不是将大量对象存在堆上，而是将对象都序列化到一个预分配的内存块上，这个内存块叫做 `MemorySegment`，它代表了一段固定长度的内存（默认大小为 32KB），也是 Flink 中最小的内存分配单元，并且提供了非常高效的读写方法。** 你可以把 MemorySegment 想象成是为 Flink 定制的 `java.nio.ByteBuffer`。它的底层可以是一个普通的 Java 字节数组（`byte[]`），也可以是一个申请在堆外的 `ByteBuffer`。每条记录都会以序列化的形式存储在一个或多个`MemorySegment`中。
@@ -3491,16 +3792,16 @@ https://zhuanlan.zhihu.com/p/90721680
 >
 > ![image-20210302164011180](./flink_note.assets/image-20210302164011180.png)
 >
-> - **Network Buffers:** 一定数量的32KB大小的 buffer，**主要用于数据的网络传输。**在 TaskManager 启动的时候就会分配。默认数量是 2048 个，可以通过 `taskmanager.network.numberOfBuffers` 来配置。（阅读[这篇文章](http://wuchong.me/blog/2016/04/26/flink-internals-how-to-handle-backpressure/#网络传输中的内存管理)了解更多Network Buffer的管理）
-> - **FlinkManagementMemory**   （Memory Manager Pool）: 这是一个由 `MemoryManager` 管理的，由众多`MemorySegment`组成的超大集合。**Flink 中的算法（如 sort/shuffle/join）会向这个内存池申请 MemorySegment，将序列化后的数据存于其中，使用完后释放回内存池。**默认情况下，池子占了堆内存的 70% 的大小。
-> - **Remaining (Free) Heap:** 这部分的内存是**留给用户代码以及 TaskManager 的数据结构使用的**。因为这些数据结构一般都很小，所以基本上这些内存都是给用户代码使用的。从GC的角度来看，可以把这里看成的新生代，也就是说**这里主要都是由用户代码生成的短期对象。**
+> - **Network Buffers:** 一定数量的32KB大小的 buffer，**主要用于数据的网络传输。**在 TaskManager 启动的时候就会分配。默认数量是 2048 个，可以通过 **`taskmanager.network.numberOfBuffers`** 来配置。（阅读[这篇文章](http://wuchong.me/blog/2016/04/26/flink-internals-how-to-handle-backpressure/#网络传输中的内存管理)了解更多Network Buffer的管理）
+> - **Management Memory**   （Memory Manager Pool）: 这是一个由 `MemoryManager` 管理的，由众多`MemorySegment`组成的超大集合。**Flink 中的算法（如 sort/shuffle/join）会向这个内存池申请 MemorySegment，将序列化后的数据存于其中，使用完后释放回内存池。**默认情况下，池子占了堆内存的 70% 的大小。
+> -  **Free Heap:** 这部分的内存是**留给用户代码以及 TaskManager 的数据结构使用的**。因为这些数据结构一般都很小，所以基本上这些内存都是给用户代码使用的。从GC的角度来看，可以把这里看成的新生代，也就是说**这里主要都是由用户代码生成的短期对象。**
 >
 > 从上面我们能够得出 Flink **积极的内存管理以及直接操作二进制数据**有以下几点好处：
 >
 > 1. **减少GC压力。**显而易见，因为所有常驻型数据都以二进制的形式存在 Flink 的`MemoryManager`中，**这些`MemorySegment`一直呆在老年代而不会被GC回收。其他的数据对象基本上是由用户代码生成的短生命周期对象，这部分对象可以被 Minor GC 快速回收。只要用户不去创建大量类似缓存的常驻型对象，那么老年代的大小是不会变的，Major GC也就永远不会发生。从而有效地降低了垃圾回收的压力。另外，这里的内存块还可以是堆外内存，这可以使得 JVM 内存更小，从而加速垃圾回收。**
 > 2. **避免了OOM。**所有的运行时数据结构和算法**只能通过内存池申请内存，保证了其使用的内存大小是固定的，不会因为运行时数据结构和算法而发生OOM。**在内存吃紧的情况下，**算法（sort/join等）会高效地将一大批内存块写到磁盘，之后再读回来。因此，`OutOfMemoryErrors`可以有效地被避免。**
-> 3. **节省内存空间。****Java 对象在存储上有很多额外的消耗（如上一节所谈）。如果只存储实际数据的二进制内容，就可以避免这部分消耗。**
-> 4. **高效的二进制操作 & 缓存友好的计算。****二进制数据以定义好的格式存储，可以高效地比较与操作。另外，该**二进制形式可以把相关的值，以及hash值，键值和指针等相邻地放进内存中**。这使得数据结构可以对高速缓存更友好，可以从 L1/L2/L3 缓存获得性能的提升**（下文会详细解释）。
+> 3. **节省内存空间。**Java 对象在存储上有很多额外的消耗（如上一节所谈）。如果只存储实际数据的二进制内容，就可以避免这部分消耗。
+> 4. **高效的二进制操作 & 缓存友好的计算。二进制数据以定义好的格式存储，可以高效地比较与操作。另外，该**二进制形式可以**把相关的值，以及hash值，键值和指针等相邻地放进内存中。这使得数据结构可以对高速缓存更友好，可以从 L1/L2/L3 缓存获得性能的提升**（下文会详细解释）。
 >
 > ## 为 Flink 量身定制的序列化框架
 >
@@ -3522,7 +3823,7 @@ https://zhuanlan.zhihu.com/p/90721680
 >
 > ![image-20210302165909920](./flink_note.assets/image-20210302165909920.png)
 >
-> 我们会**把 sort buffer 分成两块区域。一个区域是用来存放所有对象完整的二进制数据。另一个区域用来存放指向完整二进制数据的指针以及定长的序列化后的key（key+pointer）**。**如果需要序列化的key是个变长类型，如String，则会取其前缀序列化。如上图所示，当一个对象要加到 sort buffer 中时，它的二进制数据会被加到第一个区域，指针（可能还有key）会被加到第二个区域。**   **（注：和 spark 的tungsten 缓存敏感性优化非常类似）**
+> 我们会**把 sort buffer 分成两块区域。一个区域是用来存放所有对象完整的二进制数据。另一个区域用来存放指向完整二进制数据的指针以及定长的序列化后的key（key+pointer）。如果需要序列化的key是个变长类型，如String，则会取其前缀序列化。如上图所示，当一个对象要加到 sort buffer 中时，它的二进制数据会被加到第一个区域，指针（可能还有key）会被加到第二个区域。**   **（注：和 spark 的tungsten 缓存敏感性优化非常类似）**
 >
 > 将实际的数据和指针加定长key分开存放有两个目的。**第一，交换定长块（key+pointer）更高效，不用交换真实的数据也不用移动其他key和pointer。第二，这样做是缓存友好的，因为key都是连续存储在内存中的，可以大大减少 cache miss**（后面会详细解释）。
 >
@@ -3763,31 +4064,27 @@ https://zhuanlan.zhihu.com/p/90721680
 >	}
 >```
 >
->
->
->
->
 >```java
->  public void advanceWatermark(Watermark watermark) throws Exception {
->      for (InternalTimerServiceImpl<?, ?> service : timerServices.values()) {
->          service.advanceWatermark(watermark.getTimestamp());
->      }
+> public void advanceWatermark(Watermark watermark) throws Exception {
+>     for (InternalTimerServiceImpl<?, ?> service : timerServices.values()) {
+>         service.advanceWatermark(watermark.getTimestamp());
+>     }
 >  }
->```
->
->继续向上追溯，到达终点：算子基类AbstractStreamOperator中处理水印的方法processWatermark()。当水印到来时，就会按着上述调用链流转到InternalTimerServiceImpl中，并触发所有早于水印时间戳的Timer了。
->
+> ```
+> 
+> 继续向上追溯，到达终点：算子基类AbstractStreamOperator中处理水印的方法processWatermark()。当水印到来时，就会按着上述调用链流转到InternalTimerServiceImpl中，并触发所有早于水印时间戳的Timer了。
+> 
 >```java
->  public void processWatermark(Watermark mark) throws Exception {
->      if (timeServiceManager != null) {
->          timeServiceManager.advanceWatermark(mark);
->      }
+> public void processWatermark(Watermark mark) throws Exception {
+>     if (timeServiceManager != null) {
+>         timeServiceManager.advanceWatermark(mark);
+>     }
 >      output.emitWatermark(mark);
 >  }
->```
->
->**（重要）所以，事件时间中，触发timer的方式是当数据流中收到 Watermark后，每个时间服务都会检查 计时器队列，将timestamp小于 Watermark 的计时器都触发**
->
+> ```
+> 
+> **（重要）所以，事件时间中，触发timer的方式是当数据流中收到 Watermark后，每个时间服务都会检查 计时器队列，将timestamp小于 Watermark 的计时器都触发**
+> 
 >至此，我们算是基本打通了 Flink Timer 机制的实现细节，well done
 
 ## Flink Timer（定时器）机制（自我总结）
@@ -3977,7 +4274,7 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 
 ## [Flink系列之Metrics, 指标监控](https://zhuanlan.zhihu.com/p/50686853) 写得很好，能明白基本原理
 
->Flink Metrics指任务在flink集群中运行过程中的各项指标，包括机器系统指标：Hostname，CPU，Memory，Thread，GC，NetWork，IO 和 任务运行组件指标：JobManager，TaskManager，Job, Task，Operater相关指标。Flink提供metrics的目的有两点：**第一，实时采集metrics的数据供flink UI进行数据展示，用户可以在页面上看到自己提交任务的状态，延迟等信息。第二，对外提供metrics收集接口，用户可以将整个fllink集群的metrics通过MetricsReport上报至第三方系统进行存储，展示和监控。**第二种对大型的互联网公司很有用，一般他们的集群规模比较大，不可能通过flink UI进行所有任务的展示，所以就通过metrics上报的方式进行dashboard的展示，同时存储下来的metrics可以用于监控报警，更进一步来说，可以用历史数据进行数据挖掘产生更大的价值。Flink原生的提供了几种主流的第三方上报方式：**JMXReporter，GangliaReport，GraphiteReport等，用户可以直接配置使用**。
+>Flink Metrics 指任务在flink集群中运行过程中的各项指标，包括机器系统指标：Hostname，CPU，Memory，Thread，GC，NetWork，IO 和 任务运行组件指标：JobManager，TaskManager，Job, Task，Operater相关指标。Flink提供metrics的目的有两点：**第一，实时采集metrics的数据供flink UI进行数据展示，用户可以在页面上看到自己提交任务的状态，延迟等信息。第二，对外提供metrics收集接口，用户可以将整个fllink集群的metrics通过MetricsReport上报至第三方系统进行存储，展示和监控。**第二种对大型的互联网公司很有用，一般他们的集群规模比较大，不可能通过flink UI进行所有任务的展示，所以就通过metrics上报的方式进行dashboard的展示，同时存储下来的metrics可以用于监控报警，更进一步来说，可以用历史数据进行数据挖掘产生更大的价值。Flink原生的提供了几种主流的第三方上报方式：**JMXReporter，GangliaReport，GraphiteReport等，用户可以直接配置使用**。
 >
 >Flink Metrics是通过引入com.codahale.metrics包实现的，它将收集的metrics分为四大类：Counter，Gauge，Histogram和Meter下面分别说明：
 >
@@ -4120,17 +4417,25 @@ public abstract class AbstractInput<IN, OUT> implements Input<IN> {
 
 ### [Flink流计算编程--Flink扩容、程序升级前后的思考](https://blog.csdn.net/lmalds/article/details/73457767)(很全面)
 
+>Flink 中有两种类型的状态：
+>
+>**1、operator state**
+>**2、keyed state**
+>每个operator state一定会绑定到一个特定的 operator，其是属于一个operator的，例如实现了ListCheckpointed接口的operator。比如kafka就是一个很好的operator的例子。
+>
+>keyed state就相当于分组后的 operator state。其通常要基于keyedStream。
+>
 >**对于operator的增删，需要注意**：
 >
 >添加或删除无状态的operator：没有什么问题
 >
 >添加一个有状态的operator：初始化时就用默认的状态，通常是空或初始值，除非此operator还引用了别的operator
 >
->删除一个有状态的operator：状态丢了，这时会报出找不到operator的错误，你要通过-n(--allowNonRestoredState)来指定跳过这个operator的状态恢复
+>删除一个有状态的operator：状态丢了，这时会报出找不到operator的错误，你要通过-n(--allowNonRestoredState)来指定跳过这个operator的状态恢复.
 >
 >输入或输出类型的改变：你得确保有状态的operator的内部状态没有被修改才行。
 >
->更改operator chaining：通过对operator设置chaning可以提高性能。但是不同的Flink版本在升级后可能会打破这种chaining，所以，所有的operator最好添加uid。
+>更改operator chaining：**通过对operator设置chaining可以提高性能。但是不同的Flink版本在升级后可能会打破这种chaining，所以，所有的operator最好添加uid。**
 
 ### 聊聊flink的ParameterTool
 
@@ -4138,9 +4443,9 @@ https://cloud.tencent.com/developer/article/1398203
 
 >## **小结**
 >
->- ParameterTool提供了**fromPropertiesFile、fromArgs、fromSystemProperties、fromMap静态方法用于创建ParameterTool**
->- ParameterTool提供了get、getRequired、getInt、getLong、getFloat、getDouble、getBoolean、getShort、getByte等方法，每种类型的get均提供了一个支持defaultValue的方法
->- ParameterTool**继承了ExecutionConfig.GlobalJobParameters，其toMap方法返回的是data属性；使用env.getConfig().setGlobalJobParameters可以将ParameterTool的访问范围设置为global**
+>- ParameterTool 提供了**fromPropertiesFile、fromArgs、fromSystemProperties、fromMap静态方法用于创建ParameterTool**
+>- ParameterTool 提供了get、getRequired、getInt、getLong、getFloat、getDouble、getBoolean、getShort、getByte等方法，每种类型的get均提供了一个支持defaultValue的方法
+>- ParameterTool** 继承了ExecutionConfig.GlobalJobParameters，其toMap方法返回的是data属性；使用env.getConfig().setGlobalJobParameters可以将ParameterTool的访问范围设置为global**
 >
 >## **doc**
 >
@@ -4260,11 +4565,11 @@ P52 TaskManager 会在同一个JVM进程内部以多线程的方式执行任务�
 
 ## P53 高可用设置
 
-* TaskManager故障
+* TaskManager 故障
 
 没有足够的处理槽，无法重启应用。
 
-*  JobManager故障
+*  JobManager 故障
 
 JobManager 用于控制流式应用执行以及保存该过程中的元数据（如已完成检查点的存储路径）。如果JobManager消失，流式应用就无法继续处理数据。**flink使用zk提供高可用模式**。
 
@@ -4465,7 +4770,7 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
 - MemoryStateBackend
 
-  - 内存级别的状态后端，**会将键控状态作为内存中的对象进行管理，将它们存在TaskManager 的 JVM 堆上**，而将 **checkpoint 存储在JobManager 的内存中**。
+  - 内存级别的状态后端，**会将监控状态作为内存中的对象进行管理，将它们存在TaskManager 的 JVM 堆上**，而将 **checkpoint 存储在JobManager 的内存中**。
   - 快速访问，低延迟，容错率低
 
 - FsStateBackend
@@ -4482,7 +4787,7 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
   
 
-  FileSystem state backend与RocksDB state backend支持 异步做检查点。当一个检查点被触发时，state backend 在本地创建一个检查点的副本。在本地副本创建完成后，task继续它的正常处理。一个后端线程会异步地复制本地快照到远端存储，并在它完成检查点后提醒task。异步检查点可以显著地降低一个task从暂停到继续处理数据，这中间的时间。另外，RocksDB state backend也有增量检查点的功能，可以减少数据的传输量。
+  FileSystem state backend与RocksDB state backend支持 **异步做检查点**。当一个检查点被触发时，state backend 在本地创建一个检查点的副本。在本地副本创建完成后，task继续它的正常处理。一个后端线程会异步地复制本地快照到远端存储，并在它完成检查点后提醒task。异步检查点可以显著地降低一个task从暂停到继续处理数据，这中间的时间。另外，RocksDB state backend也有增量检查点的功能，可以减少数据的传输量。
 
 ## P68 对有状态算子的扩缩容
 
@@ -4496,7 +4801,7 @@ public abstract class WindowAssigner<T, W extends Window> implements Serializabl
 
 **因为对状态的处理会直接影响算子语义，所以Flink无法通过自动清理状态来释放资源，所有有状态算子，都要控制自身状态大小，确保他们不会无限制增长。**
 
-如果你的应用需要用到键值域不断变化的键值分区状态，那么必须确保那些无用的状态能够被删除。该工作可以通过注册一个针对未来某个时间点的timer来完成。**和状态类似，计时器也会注册在当前活动键值的上下文中。Timer在触发时，会调用回调方法，并加载计时器键值的上下文。因此，在回调方法中可以获取到当前键值状态的完整访问权限，并将其删除。
+如果你的应用需要用到键值域不断变化的键值分区状态，那么必须确保那些无用的状态能够被删除。该工作可以通过注册一个针对未来某个时间点的timer来完成。**和状态类似，计时器也会注册在当前活动键值的上下文中。Timer在触发时，会调用回调方法，并加载计时器键值的上下文。因此，在回调方法中可以获取到当前键值状态的完整访问权限，并将其删除。**
 
 只有窗口的 Trigger 接口和 Process 函数才支持注册计时器。
 
@@ -4514,7 +4819,7 @@ Flink 默认情况下不允许那些无法将保存点中的状态全部恢复�
 
 Flink 的**检查点和恢复机制结合可重置的数据源连接器能够保证应用不会丢失数据**，但可能发出重复的数据。若想提供端到端的一致性保障，需要特殊的数据汇连接器实现。数据汇连接器需要实现两种技术：**幂等性写和事务性写**。
 
-Flink 提供了两个构件来实现**事务性**的数据汇连接器：**一个通用性的 WAL（write ahead log，写前日志）数据汇和一个2PC（two-phase commit，两阶段提交）数据汇。**
+Flink 提供了两个构件来实现**事务性**的数据汇连接器：**一个通用性的 WAL（write ahead log，写前日志）数据汇和一个2PC（two-phase commit，两阶段提交）数据汇。** （看下书上p.212 对该部分的介绍，区分 WAL 和 2PC 的优缺点）
 
 ## P221 读写kafka连接器，自定义分区和写入消息时间戳
 
@@ -4528,11 +4833,11 @@ Flink 提供了两个构件来实现**事务性**的数据汇连接器：**一�
 
 * GenerticWriteAheadSink
 
-每个检查点周期内所有需要写出的记录先存到算子状态中，该状态会被**写出到检查点**，并在故障时进行恢复。当一个任务接收到检查点完成通知时，会将此次检查点周期内所有记录写入外部系统。
+每个检查点周期内所有需要写出的记录先存到算子状态中，该状态会被**写出到检查点**，并在故障时进行恢复。当一个任务接收到检查点完成通知时，会将此次检查点周期内所有记录写入外部系统。 **（优点：通用   缺点：波峰式写入、状态大小会增加）**
 
 * TwoPhaseCommitSinkFunction
 
-每个检查点都会开启一个新的事务，并以当前事务为上下文将所有后续记录**写入数据汇系统**。数据汇在接收到对应检查点完成通知后才会提交事务。
+每个检查点都会开启一个新的事务，并以当前事务为上下文将所有后续记录**写入数据汇系统**。数据汇在接收到对应检查点完成通知后才会提交事务。**（需要数据汇支持事务）**
 
 ## P253 部署模式
 
