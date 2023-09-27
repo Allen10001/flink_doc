@@ -25,11 +25,11 @@
 >一共三个分区器实现了 Partitioner类的 partition()方法：
 >
 >1.  **DefaultPartitioner**
->   **指定分区则使用；否则如果存在 key 则根据 key 去 hash；否则 batch 满了切换分区。**
+>     **指定分区则使用；否则如果存在 key 则根据 key 去 hash；否则 batch 满了切换分区。**
 >2.  **RoundRobinPartitioner**
->   没指定分区则平均分配循环写入分区。
+>     没指定分区则平均分配循环写入分区。
 >3.  **UniformStickyPartitioner**
->   和默认相比去除掉 key 取 hash 相关的规则。
+>     和默认相比去除掉 key 取 hash 相关的规则。
 >
 >综上，我们想实现数据顺序入 kafka，可以指定分区写或者通过设置 key 值相同保证数据入同一个分区。但是要注意避免全部数据入同一分区的场景，最好将数据分组即保证组内数据有序而不是全局有序。
 >
